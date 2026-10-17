@@ -151,7 +151,7 @@ function seg(marker, payload) {
 
 /**
  * APP1 EXIF payload ('Exif\0\0' + TIFF). IFD0 holds ImageDescription (EVIL-EXIF-DESC),
- * optional Orientation and a GPS IFD pointer; GPS IFD: N 55°45'12.34", E 37°37'4.56".
+ * optional Orientation and a GPS IFD pointer; GPS IFD: N 0°0'0", E 0°0'0" (neutral Null Island).
  * @param {{orientation?: number, littleEndian?: boolean, gps?: boolean}} [opts]
  */
 export function exifPayload({ orientation, littleEndian = false, gps = true } = {}) {
@@ -197,7 +197,7 @@ export function exifPayload({ orientation, littleEndian = false, gps = true } = 
     ent(2, 3, 2, 2, 0, 'E'); // GPSLongitudeRef
     ent(3, 4, 5, 3, ratOff + 24); // GPSLongitude
     dv.setUint32(g + 2 + 48, 0, le);
-    const rats = [55, 1, 45, 1, 1234, 100, 37, 1, 37, 1, 456, 100];
+    const rats = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1];
     rats.forEach((v, k) => dv.setUint32(t + ratOff + k * 4, v, le));
     end = t + ratOff + rats.length * 4;
   }
@@ -211,7 +211,7 @@ export const exifGpsPayload = () => exifPayload();
 export function gpsRationalBytes(littleEndian = false) {
   const b = new Uint8Array(24);
   const dv = new DataView(b.buffer);
-  [55, 1, 45, 1, 1234, 100].forEach((v, k) => dv.setUint32(k * 4, v, littleEndian));
+  [0, 1, 0, 1, 0, 1].forEach((v, k) => dv.setUint32(k * 4, v, littleEndian));
   return b;
 }
 
