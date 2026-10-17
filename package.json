@@ -1,0 +1,41 @@
+{
+  "name": "@local-pdf-tools/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure PDF functions (merge, split, organize, images to PDF) on Uint8Array. No filesystem, no DOM, no network.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./fixtures": {
+      "types": "./test/fixtures/gen.d.ts",
+      "default": "./test/fixtures/gen.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "test/fixtures/gen.mjs",
+    "test/fixtures/gen.d.ts",
+    "THIRD-PARTY.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/swtormy-agents/pdf-tools.git"
+  },
+  "scripts": {
+    "fixtures": "node test/fixtures/gen.mjs",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "pdf-lib": "1.17.1"
+  }
+}

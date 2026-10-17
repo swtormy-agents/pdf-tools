@@ -1,0 +1,169 @@
+# @local-pdf-tools/core
+
+Pure JavaScript PDF functions for local, private PDF tools: **merge, split, organize
+(reorder / rotate / delete) and images to PDF**. Every function takes `Uint8Array` input
+plus plain parameters and returns `Uint8Array` output.
+
+- No filesystem, no DOM, no network, no global state. Runs in browsers, Node >= 18 and workers.
+- ESM only, named exports only (no default export). TypeScript declarations included.
+- One runtime dependency: [pdf-lib](https://github.com/Hopding/pdf-lib) 1.17.1 (MIT),
+  pinned exactly. See [THIRD-PARTY.md](THIRD-PARTY.md).
+- Outputs are always new documents, cleaned of metadata, scripts, forms and attachments
+  (see [Security](#security)).
+
+Status: `0.1.0`, `private: true` (not published to npm). Consume it as a git dependency:
+
+```json
+"dependencies": { "@local-pdf-tools/core": "github:swtormy-agents/pdf-tools#<commit-sha>" }
+```
+
+```js
+import { merge, split, organize, imagesToPdf, pdfInfo, PdfToolError } from '@local-pdf-tools/core';
+```
+
+## API
+
+All functions are `async` (return a `Promise`) except `parsePageRanges` and the helpers.
+Page **numbers** are 1-based (human); page **indexes** are 0-based (as in `organize`).
+
+### `pdfInfo(bytes: Uint8Array): Promise<{ pages: number, encrypted: false }>`
+
+Page count of a PDF. Encrypted or password-protected files throw `PDF_ENCRYPTED`
+(they are never opened with `ignoreEncryption`).
+
+### `merge(list: Array<{ bytes: Uint8Array, pages?: string | number[] }>): Promise<Uint8Array>`
+
+Concatenates documents in list order. `pages` selects pages of that item: a 1-based range
+string (`'1-3,5'`, same syntax as `parsePageRanges`, groups flattened in order) or an array
+of 0-based indexes (repeats allowed). Omitted = all pages.
+
+### `split(bytes: Uint8Array, ranges: string | Array<[from: number, to: number]>): Promise<Array<{ pages: number[], bytes: Uint8Array }>>`
+
+One output document per range group. `ranges` is a 1-based range string (`'1-3,5'` gives two
+documents: pages 1-3 and page 5) or an array of inclusive 1-based `[from, to]` pairs.
+`pages` in each result lists the 1-based source pages it contains. There is no "every N
+pages" mode; build the ranges on the caller side.
+
+### `organize(bytes: Uint8Array, ops: { order: number[], rotate?: { [index: number]: number } }): Promise<Uint8Array>`
+
+- `order`: the final page sequence as 0-based ORIGINAL indexes. Pages absent from `order`
+  are deleted. Repeats are allowed (each copy counts against `MAX_PAGES`). Empty or missing
+  `order` -> `PAGE_RANGE`.
+- `rotate`: original index -> degrees. Must be a multiple of 90 (negative allowed); it is
+  added to the page's existing rotation and normalized mod 360. Applies to every copy of
+  that page. Non-multiples of 90 -> `PAGE_RANGE`.
+
+### `imagesToPdf(list: Array<{ bytes: Uint8Array, type?: string }>): Promise<Uint8Array>`
+
+One page per image, in list order. The format is detected from magic bytes (JPEG
+`FF D8 FF`, PNG signature); `type` is optional and ignored. Each page has the size of the
+image, 1 px = 1 pt, after the EXIF orientation (1..8) is applied (orientations 5-8 swap
+width and height). A page is scaled down only if a side would exceed 14 400 pt, the PDF
+implementation limit.
+
+- Pixel dimensions are read from the JPEG SOF / PNG IHDR header and checked against
+  `MAX_IMAGE_PIXELS` **before** any decoding or embedding (`IMAGE_TOO_LARGE`).
+- JPEG is embedded without re-encoding. Removed first: APP1 (EXIF incl. GPS, XMP), APP13
+  (IPTC/Photoshop), COM, APP2 segments that are not `ICC_PROFILE` (MPF, FlashPix),
+  APP3-APP12, APP15, and any data after EOI. Kept: APP0 (JFIF), APP2 `ICC_PROFILE`, APP14
+  (Adobe, needed for correct CMYK/YCCK colours), and all tables/frame/scan data.
+- PNG: only `IHDR`, `PLTE`, `tRNS`, `IDAT`, `IEND` are passed to pdf-lib, which decodes
+  and re-encodes the pixels; `tEXt`, `iTXt`, `zTXt`, `eXIf`, `tIME` etc. never reach the PDF.
+
+### `parsePageRanges(spec: string, pageCount: number, maxTotal = LIMITS.MAX_PAGES): number[][]`
+
+`'1-3,5'` with 10 pages -> `[[0, 1, 2], [4]]` (0-based groups).
+
+- Group separators: `,` and fullwidth `，` (U+FF0C).
+- Range dashes: `-`, en dash `–` (U+2013), `~`, fullwidth `～` (U+FF5E).
+- Whitespace (incl. U+3000) is ignored anywhere; empty groups (`1,,2`, trailing `,`) are skipped.
+- Open ends: `'8-'` = 8 to last page, `'-3'` = 1 to 3.
+- Syntax errors, reversed ranges (`4-2`), pages outside `1..pageCount`, or no group ->
+  `PAGE_RANGE`. More than `maxTotal` pages over all groups -> `TOO_MANY_PAGES`.
+
+### Helpers
+
+`jpegSize(bytes)`, `pngSize(bytes)` -> `{ width, height }` from the header;
+`jpegOrientation(bytes)` -> `1..8`; `stripJpeg(bytes)`, `stripPng(bytes)` -> cleaned copy;
+`orientationMatrix(orientation, width, height)` -> PDF `cm` matrix `[a, b, c, d, e, f]`.
+
+### `LIMITS`
+
+Frozen object, used by the core itself; there is no per-call override.
+
+| Field | Value | Applies to |
+|---|---|---|
+| `MAX_FILE_BYTES` | `100 * 1024 * 1024` | each input file (PDF or image) |
+| `MAX_TOTAL_BYTES` | `300 * 1024 * 1024` | all inputs of one call together |
+| `MAX_PAGES` | `1000` | pages of the RESULT (for `split`: all outputs together). Inputs may be longer |
+| `MAX_FILES` | `50` | items in `merge` / `imagesToPdf` |
+| `MAX_IMAGE_PIXELS` | `50_000_000` | width x height of each image, from the header |
+
+Byte and file-count limits are checked before anything is parsed.
+
+### Errors
+
+Every failure is thrown as `class PdfToolError extends Error` with:
+
+- `.name === 'PdfToolError'`
+- `.code`: string, one of `ERROR_CODES`
+- `.message`: English, never contains document content
+- `.details` (optional): small object, e.g. `{ index }` (which input item) or `{ max }`
+
+`ERROR_CODES` (exported, in this order):
+
+| Code | When |
+|---|---|
+| `PDF_ENCRYPTED` | input PDF is encrypted / password-protected |
+| `PDF_INVALID` | not a PDF, broken PDF, no pages, or wrong argument type (bytes not a `Uint8Array`, empty list) |
+| `PAGE_RANGE` | bad range string, page/index out of range, bad `organize` ops or rotation |
+| `TOO_LARGE` | a file > `MAX_FILE_BYTES` or all files > `MAX_TOTAL_BYTES` |
+| `TOO_MANY_PAGES` | result would exceed `MAX_PAGES` |
+| `TOO_MANY_FILES` | more than `MAX_FILES` items |
+| `IMAGE_TOO_LARGE` | image header says more than `MAX_IMAGE_PIXELS` |
+| `UNSUPPORTED_IMAGE` | not JPEG or PNG (by magic bytes) |
+| `IMAGE_INVALID` | JPEG/PNG signature present but the file is corrupt or cannot be decoded |
+
+## Security
+
+Agreed with QA/Security and Counsel; covered by tests in `test/`.
+
+- Input PDFs are loaded with pdf-lib **default options**; `ignoreEncryption` is never set.
+  Encrypted -> `PDF_ENCRYPTED`, any other parse failure -> `PDF_INVALID`.
+- Every output is a new document (`PDFDocument.create()` + `copyPages`):
+  - no Info dictionary at all (no Producer/Creator/Author/Title/Subject/Keywords/dates);
+  - catalog holds only `/Type` and `/Pages`: no XMP `/Metadata`, `/Names` (document
+    JavaScript, embedded files), `/AcroForm`, `/OpenAction`, outlines.
+- Every copied page is cleaned **before** copying, so removed objects are never written:
+  - page keys `/AA`, `/Metadata`, `/PieceInfo`, `/B`, `/StructParents`, `/Thumb`, `/ID`,
+    `/PZ`, `/SeparationInfo` are removed;
+  - `/Annots` keeps only `Link` annotations whose action is a single `URI` action with an
+    `http:`, `https:` or `mailto:` URI, rebuilt as a fresh minimal dict
+    (`/Type /Subtype /Rect /Border /A`). Dropped: Widgets (form fields), anything with
+    `/AA`, JavaScript, Launch, SubmitForm, ImportData, GoToR, GoToE, chained `/Next`
+    actions, `javascript:` URIs, internal `/Dest` links (they would pull other pages,
+    including deleted ones, into the file), markup annotations (author names, popups) and
+    file attachments.
+- Images: see `imagesToPdf` (header-first size check, metadata removal).
+
+Known noise: on broken input pdf-lib writes parser warnings with `console.warn` (stderr).
+Nothing is written to stdout in the tested paths, so stdio-based servers are not affected.
+
+## Tests
+
+```sh
+npm ci
+npm test            # node --test test/
+npm run fixtures    # optional: write fixtures to test/fixtures/out/ for manual inspection
+```
+
+Fixtures are generated in code by `test/fixtures/gen.mjs`, exported as the package
+subpath `@local-pdf-tools/core/fixtures` (Node only, uses `node:zlib`). They include a
+hand-written PDF with a Standard-security `/Encrypt` dict in the trailer (pdf-lib cannot
+encrypt), a PDF with metadata, XMP, JavaScript, actions, a form field, page `/AA`,
+attachments and annotations, JPEGs with EXIF GPS and all 8 orientations, a JPEG with
+ICC/Adobe segments, a PNG with text/EXIF chunks, oversized image headers and corrupt bytes.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Third-party notices: [THIRD-PARTY.md](THIRD-PARTY.md).

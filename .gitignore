@@ -1,0 +1,7 @@
+node_modules/
+test/fixtures/out/
+*.env
+.env*
+secrets/
+*.log
+.DS_Store
