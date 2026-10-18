@@ -17,7 +17,23 @@ export declare class PdfToolError extends Error {
   constructor(code: ErrorCode, message: string, details?: Record<string, unknown>);
   readonly name: 'PdfToolError';
   code: ErrorCode;
-  details?: { index?: number; max?: number; [key: string]: unknown };
+  /**
+   * PAGE_RANGE from organize: { index (position in order), page (original index), pageCount }
+   * or, for rotate, { page, degrees?, pageCount }. From merge: { index (input item),
+   * position?, page?, from?, to?, pageCount }. page/degrees are null when not a number.
+   */
+  details?: {
+    index?: number;
+    max?: number;
+    position?: number;
+    page?: number | null;
+    pageCount?: number;
+    from?: number;
+    to?: number;
+    degrees?: number | null;
+    option?: 'pageSize' | 'margin';
+    [key: string]: unknown;
+  };
 }
 
 export declare const LIMITS: Readonly<{
@@ -28,9 +44,9 @@ export declare const LIMITS: Readonly<{
   MAX_IMAGE_PIXELS: number; // 50_000_000
 }>;
 
+/** Encrypted / password-protected input throws PDF_ENCRYPTED instead of returning. */
 export interface PdfInfo {
   pages: number;
-  encrypted: false;
 }
 
 export interface MergeInput {
@@ -64,7 +80,19 @@ export declare function pdfInfo(bytes: Uint8Array): Promise<PdfInfo>;
 export declare function merge(list: MergeInput[]): Promise<Uint8Array>;
 export declare function split(bytes: Uint8Array, ranges: RangeSpec): Promise<SplitPart[]>;
 export declare function organize(bytes: Uint8Array, ops: OrganizeOps): Promise<Uint8Array>;
-export declare function imagesToPdf(list: ImageInput[]): Promise<Uint8Array>;
+export type PageSize = 'fit' | 'A4' | 'Letter';
+
+export interface ImagesToPdfOptions {
+  /** 'fit' (default): page = image size. 'A4' / 'Letter': portrait page, image scaled to fit, centered. */
+  pageSize?: PageSize;
+  /** Points on every side, default 0. With 'fit' the page grows by 2 * margin. */
+  margin?: number;
+}
+
+/** Fixed page sizes in points, portrait [width, height]. */
+export declare const PAGE_SIZES: Readonly<{ A4: readonly [595.28, 841.89]; Letter: readonly [612, 792] }>;
+
+export declare function imagesToPdf(list: ImageInput[], options?: ImagesToPdfOptions): Promise<Uint8Array>;
 
 /** '1-3,5' -> [[0,1,2],[4]] (0-based). Separators , ，  dashes - – ~ ～, spaces ignored. */
 export declare function parsePageRanges(spec: string, pageCount: number, maxTotal?: number): number[][];

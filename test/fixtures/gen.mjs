@@ -345,6 +345,33 @@ export function pngWithSize(width, height) {
   return concat(PNG_SIG, ihdr(width, height), pngChunk('IDAT', deflateSync(new Uint8Array(64))), pngChunk('IEND', new Uint8Array(0)));
 }
 
+/**
+ * Valid 1-page PDF plus an unreferenced /ObjStm whose FlateDecode data is a zlib header
+ * followed by deterministic garbage. pdf-lib decodes object streams while parsing, so this
+ * drives its pdf.js/XPDF FlateStream decoder (used by the "nothing on stdout" test).
+ */
+export function brokenFlatePdf(seed = 1) {
+  const data = concat(Uint8Array.of(0x78, 0x9c), corruptBytes(256, seed));
+  const head = '%PDF-1.5\n%\xe2\xe3\xcf\xd3\n';
+  const objs = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>',
+  ];
+  let body = head;
+  const offsets = [];
+  objs.forEach((o, i) => { offsets.push(body.length); body += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+  offsets.push(body.length);
+  const streamHead = `4 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Filter /FlateDecode /Length ${data.length} >>\nstream\n`;
+  const afterStream = '\nendstream\nendobj\n';
+  const xrefAt = body.length + streamHead.length + data.length + afterStream.length;
+  let tail = `xref\n0 5\n0000000000 65535 f \n`;
+  for (const off of offsets) tail += `${String(off).padStart(10, '0')} 00000 n \n`;
+  tail += `trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+  const latin = (t) => Uint8Array.from(t, (c) => c.charCodeAt(0));
+  return concat(latin(body + streamHead), data, latin(afterStream + tail));
+}
+
 /** All file fixtures by name (async). */
 export async function allFixtures() {
   return {
@@ -353,6 +380,7 @@ export async function allFixtures() {
     'encrypted.pdf': encryptedPdf(),
     'corrupt.bin': corruptBytes(),
     'truncated.pdf': truncatedPdf(),
+    'broken-flate.pdf': brokenFlatePdf(),
     'plain.jpg': plainJpeg(),
     'exif-gps.jpg': exifJpeg(),
     ...Object.fromEntries([1, 2, 3, 4, 5, 6, 7, 8].map((o) => [`orientation-${o}.jpg`, orientedJpeg(o)])),

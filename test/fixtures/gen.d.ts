@@ -8,6 +8,8 @@ export declare function evilPdf(): Promise<Uint8Array>;
 export declare function encryptedPdf(): Uint8Array;
 export declare function corruptBytes(n?: number, seed?: number): Uint8Array;
 export declare function truncatedPdf(): Uint8Array;
+/** Valid 1-page PDF plus an unreferenced /ObjStm with garbage FlateDecode data. */
+export declare function brokenFlatePdf(seed?: number): Uint8Array;
 export declare function plainJpeg(): Uint8Array;
 export declare function exifPayload(opts?: { orientation?: number; littleEndian?: boolean; gps?: boolean }): Uint8Array;
 export declare function exifGpsPayload(): Uint8Array;

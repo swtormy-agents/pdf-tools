@@ -26,16 +26,21 @@ import { merge, split, organize, imagesToPdf, pdfInfo, PdfToolError } from '@loc
 All functions are `async` (return a `Promise`) except `parsePageRanges` and the helpers.
 Page **numbers** are 1-based (human); page **indexes** are 0-based (as in `organize`).
 
-### `pdfInfo(bytes: Uint8Array): Promise<{ pages: number, encrypted: false }>`
+### `pdfInfo(bytes: Uint8Array): Promise<{ pages: number }>`
 
 Page count of a PDF. Encrypted or password-protected files throw `PDF_ENCRYPTED`
-(they are never opened with `ignoreEncryption`).
+(they are never opened with `ignoreEncryption`), so there is no `encrypted` field.
+(`0.1.0` before this change returned an always-`false` `encrypted` field; it was removed.)
 
 ### `merge(list: Array<{ bytes: Uint8Array, pages?: string | number[] }>): Promise<Uint8Array>`
 
 Concatenates documents in list order. `pages` selects pages of that item: a 1-based range
 string (`'1-3,5'`, same syntax as `parsePageRanges`, groups flattened in order) or an array
 of 0-based indexes (repeats allowed). Omitted = all pages.
+`PAGE_RANGE` details: `{ index, position, page, pageCount }` for a bad array entry
+(`index` = input item, `position` = 0-based position in its `pages` array, `page` = the
+bad value or `null` if not a number), `{ index, from, to, pageCount }` for a bad range
+string, `{ index, pageCount }` for an empty or wrongly typed selection.
 
 ### `split(bytes: Uint8Array, ranges: string | Array<[from: number, to: number]>): Promise<Array<{ pages: number[], bytes: Uint8Array }>>`
 
@@ -52,14 +57,33 @@ pages" mode; build the ranges on the caller side.
 - `rotate`: original index -> degrees. Must be a multiple of 90 (negative allowed); it is
   added to the page's existing rotation and normalized mod 360. Applies to every copy of
   that page. Non-multiples of 90 -> `PAGE_RANGE`.
+- `PAGE_RANGE` details (message unchanged):
+  - bad `order` entry: `{ index, page, pageCount }` — `index` = 0-based position in `order`,
+    `page` = the original page index given there (`null` if not a number);
+  - bad `rotate` key: `{ page, pageCount }`; bad angle: `{ page, degrees, pageCount }`;
+  - empty/missing `order` or non-object `rotate`: `{ pageCount }`.
 
-### `imagesToPdf(list: Array<{ bytes: Uint8Array, type?: string }>): Promise<Uint8Array>`
+  ```js
+  // 3-page document
+  await organize(bytes, { order: [2, 0, 5] });
+  // PdfToolError PAGE_RANGE 'order index out of range 0-2', details { index: 2, page: 5, pageCount: 3 }
+  ```
+
+### `imagesToPdf(list: Array<{ bytes: Uint8Array, type?: string }>, options?: { pageSize?: 'fit' | 'A4' | 'Letter', margin?: number }): Promise<Uint8Array>`
 
 One page per image, in list order. The format is detected from magic bytes (JPEG
-`FF D8 FF`, PNG signature); `type` is optional and ignored. Each page has the size of the
-image, 1 px = 1 pt, after the EXIF orientation (1..8) is applied (orientations 5-8 swap
-width and height). A page is scaled down only if a side would exceed 14 400 pt, the PDF
-implementation limit.
+`FF D8 FF`, PNG signature); `type` is optional and ignored. EXIF orientation (1..8) is
+applied (orientations 5-8 swap width and height).
+
+- `pageSize: 'fit'` (default): each page has the size of the image, 1 px = 1 pt. A page is
+  scaled down only if a side would exceed 14 400 pt, the PDF implementation limit.
+- `pageSize: 'A4'` (595.28 x 841.89 pt) or `'Letter'` (612 x 792 pt): portrait page; the
+  image is scaled (up or down) to fit inside the margins, aspect ratio preserved, centered.
+  Exported as `PAGE_SIZES`.
+- `margin`: points on every side, default `0`. With `'fit'` the page grows by `2 * margin`.
+  Must be `>= 0` and less than half the shorter page side (`'fit'`: `< 3600`).
+- Invalid options -> `PDF_INVALID` with `details.option` (`'pageSize'` / `'margin'`).
+- Without options (or `{}`) the output is byte-for-byte the same as before the options existed.
 
 - Pixel dimensions are read from the JPEG SOF / PNG IHDR header and checked against
   `MAX_IMAGE_PIXELS` **before** any decoding or embedding (`IMAGE_TOO_LARGE`).
@@ -80,12 +104,14 @@ implementation limit.
 - Open ends: `'8-'` = 8 to last page, `'-3'` = 1 to 3.
 - Syntax errors, reversed ranges (`4-2`), pages outside `1..pageCount`, or no group ->
   `PAGE_RANGE`. More than `maxTotal` pages over all groups -> `TOO_MANY_PAGES`.
+  Out-of-range and reversed errors carry `details` `{ from, to, pageCount }` / `{ from, to }`.
 
 ### Helpers
 
 `jpegSize(bytes)`, `pngSize(bytes)` -> `{ width, height }` from the header;
 `jpegOrientation(bytes)` -> `1..8`; `stripJpeg(bytes)`, `stripPng(bytes)` -> cleaned copy;
-`orientationMatrix(orientation, width, height)` -> PDF `cm` matrix `[a, b, c, d, e, f]`.
+`orientationMatrix(orientation, width, height)` -> PDF `cm` matrix `[a, b, c, d, e, f]`;
+`PAGE_SIZES` -> `{ A4: [595.28, 841.89], Letter: [612, 792] }` (points, portrait).
 
 ### `LIMITS`
 
@@ -108,14 +134,16 @@ Every failure is thrown as `class PdfToolError extends Error` with:
 - `.name === 'PdfToolError'`
 - `.code`: string, one of `ERROR_CODES`
 - `.message`: English, never contains document content
-- `.details` (optional): small object, e.g. `{ index }` (which input item) or `{ max }`
+- `.details` (optional): small object, e.g. `{ index }` (which input item) or `{ max }`;
+  `PAGE_RANGE` details are described under `merge`, `split` (`{ from, to, pageCount }`),
+  `organize` and `parsePageRanges`
 
 `ERROR_CODES` (exported, in this order):
 
 | Code | When |
 |---|---|
 | `PDF_ENCRYPTED` | input PDF is encrypted / password-protected |
-| `PDF_INVALID` | not a PDF, broken PDF, no pages, or wrong argument type (bytes not a `Uint8Array`, empty list) |
+| `PDF_INVALID` | not a PDF, broken PDF, no pages, or wrong argument type (bytes not a `Uint8Array`, empty list, bad `imagesToPdf` options) |
 | `PAGE_RANGE` | bad range string, page/index out of range, bad `organize` ops or rotation |
 | `TOO_LARGE` | a file > `MAX_FILE_BYTES` or all files > `MAX_TOTAL_BYTES` |
 | `TOO_MANY_PAGES` | result would exceed `MAX_PAGES` |
@@ -146,8 +174,16 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     file attachments.
 - Images: see `imagesToPdf` (header-first size check, metadata removal).
 
-Known noise: on broken input pdf-lib writes parser warnings with `console.warn` (stderr).
-Nothing is written to stdout in the tested paths, so stdio-based servers are not affected.
+Console output: on broken input pdf-lib writes parser warnings with `console.warn`
+(stderr). pdf-lib 1.17.1 has one `console.log` (stdout) call site, in its `es` and `cjs` builds:
+`FlateStream.getCode` has `if (typeof codes === 'number') console.log('FLATE:', code)`.
+`codes` is always an `Int32Array` (fixed Huffman tables or `generateHuffmanTable`), so
+this line cannot run; the core does not patch `console` (that would be global state and
+would also swallow output of concurrent code). `test/stdout.test.mjs` runs every operation
+on broken inputs, including 40 object streams with garbage Flate data that drive the
+decoder, in a child process and asserts stdout is empty; it also fails if a pdf-lib
+upgrade adds or changes any `console.log`. So stdio-based servers are not affected by
+the core; they should still route their own logging to stderr.
 
 ## Tests
 
@@ -160,7 +196,7 @@ npm run fixtures    # optional: write fixtures to test/fixtures/out/ for manual 
 Fixtures are generated in code by `test/fixtures/gen.mjs`, exported as the package
 subpath `@local-pdf-tools/core/fixtures` (Node only, uses `node:zlib`). They include a
 hand-written PDF with a Standard-security `/Encrypt` dict in the trailer (pdf-lib cannot
-encrypt), a PDF with metadata, XMP, JavaScript, actions, a form field, page `/AA`,
+encrypt), PDFs with an object stream of garbage Flate data, a PDF with metadata, XMP, JavaScript, actions, a form field, page `/AA`,
 attachments and annotations, JPEGs with EXIF GPS and all 8 orientations, a JPEG with
 ICC/Adobe segments, a PNG with text/EXIF chunks, oversized image headers and corrupt bytes.
 

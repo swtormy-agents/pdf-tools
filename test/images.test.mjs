@@ -171,3 +171,64 @@ test('unsupported vs invalid images', async () => {
   await expectCode(imagesToPdf([]), 'PDF_INVALID');
   await expectCode(imagesToPdf([{ bytes: 'x' }]), 'PDF_INVALID');
 });
+
+test('pageSize/margin: default output is unchanged (fit, no margin)', async () => {
+  const list = [{ bytes: fx.orientedJpeg(6) }, { bytes: fx.plainPng(8, 8) }];
+  const a = await imagesToPdf(list);
+  assert.deepEqual(Buffer.from(await imagesToPdf(list, {})), Buffer.from(a));
+  assert.deepEqual(Buffer.from(await imagesToPdf(list, { pageSize: 'fit', margin: 0 })), Buffer.from(a));
+});
+
+test('pageSize A4/Letter: portrait page, image scaled to fit inside margin, aspect kept, centered', async () => {
+  const W = 24, H = 16;
+  const cases = [
+    // [pageSize, margin, orientation, pageW, pageH]
+    ['A4', 0, 1, 595.28, 841.89],
+    ['A4', 36, 1, 595.28, 841.89],
+    ['Letter', 0, 1, 612, 792],
+    ['Letter', 72, 6, 612, 792],
+    ['A4', 10, 8, 595.28, 841.89],
+  ];
+  for (const [pageSize, margin, o, PW, PH] of cases) {
+    const pdf = await imagesToPdf([{ bytes: fx.orientedJpeg(o) }], { pageSize, margin });
+    await assertClean(pdf);
+    const page = (await PDFDocument.load(pdf, { updateMetadata: false })).getPage(0);
+    assert.deepEqual([page.getWidth(), page.getHeight()], [PW, PH], `${pageSize} page size`);
+    const dw = o >= 5 ? H : W;
+    const dh = o >= 5 ? W : H;
+    const s = Math.min((PW - 2 * margin) / dw, (PH - 2 * margin) / dh);
+    const x = (PW - dw * s) / 2;
+    const y = (PH - dh * s) / 2;
+    // compose translate(x, y) with the orientation matrix and map the unit square
+    const m = orientationMatrix(o, W * s, H * s);
+    const pts = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([u, v]) => [m[0] * u + m[2] * v + m[4] + x, m[1] * u + m[3] * v + m[5] + y]);
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    const close = (a, b) => Math.abs(a - b) < 1e-6;
+    // fills the content box along one axis, centered along both
+    assert.ok(close(Math.min(...xs), PW - Math.max(...xs)) && close(Math.min(...ys), PH - Math.max(...ys)), 'centered');
+    assert.ok(close(Math.min(...xs), margin) || close(Math.min(...ys), margin), 'touches the margin on one axis');
+    assert.ok(Math.min(...xs) >= margin - 1e-6 && Math.min(...ys) >= margin - 1e-6, 'inside margins');
+    assert.ok(close((Math.max(...xs) - Math.min(...xs)) / (Math.max(...ys) - Math.min(...ys)), dw / dh), 'aspect ratio kept');
+    const text = await contentText(page);
+    assert.ok(text.includes(`1 0 0 1 ${x} ${y} cm`), `translation in content: ${text}`);
+    assert.ok(!has(pdf, 'Exif'));
+  }
+});
+
+test('margin with pageSize fit grows the page by 2 * margin', async () => {
+  const pdf = await imagesToPdf([{ bytes: fx.plainJpeg() }], { margin: 10 });
+  const page = (await PDFDocument.load(pdf, { updateMetadata: false })).getPage(0);
+  assert.deepEqual([page.getWidth(), page.getHeight()], [44, 36]);
+  assert.ok((await contentText(page)).includes('1 0 0 1 10 10 cm'));
+});
+
+test('invalid imagesToPdf options -> PDF_INVALID', async () => {
+  const list = [{ bytes: fx.plainJpeg() }];
+  for (const options of ['A4', [], { pageSize: 'a4' }, { pageSize: 'Legal' }, { pageSize: 'toString' }, { margin: -1 },
+    { margin: '10' }, { margin: NaN }, { margin: Infinity }, { pageSize: 'A4', margin: 297.64 }, { pageSize: 'Letter', margin: 306 },
+    { margin: 3600 }]) {
+    const e = await expectCode(imagesToPdf(list, options), 'PDF_INVALID');
+    assert.ok(!e.message.includes('undefined'));
+  }
+});

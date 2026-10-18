@@ -22,8 +22,8 @@ test('contract constants', () => {
 });
 
 test('pdfInfo', async () => {
-  assert.deepEqual(await pdfInfo(await fx.plainPdf(3)), { pages: 3, encrypted: false });
-  assert.deepEqual(await pdfInfo(await fx.evilPdf()), { pages: 2, encrypted: false });
+  assert.deepEqual(await pdfInfo(await fx.plainPdf(3)), { pages: 3 });
+  assert.deepEqual(await pdfInfo(await fx.evilPdf()), { pages: 2 });
   await expectCode(pdfInfo(fx.encryptedPdf()), 'PDF_ENCRYPTED');
   await expectCode(pdfInfo(fx.corruptBytes()), 'PDF_INVALID');
   await expectCode(pdfInfo(fx.truncatedPdf()), 'PDF_INVALID');
@@ -67,6 +67,21 @@ test('merge: order and page selection', async () => {
   await expectCode(merge([{ bytes: a, pages: [3] }]), 'PAGE_RANGE');
   await expectCode(merge([{ bytes: a, pages: [] }]), 'PAGE_RANGE');
   await expectCode(merge([{ bytes: a, pages: {} }]), 'PAGE_RANGE');
+});
+
+test('merge: PAGE_RANGE details name the item, position, page and page count', async () => {
+  const a = await fx.plainPdf(3);
+  const b = await fx.plainPdf(5);
+  let e = await expectCode(merge([{ bytes: a }, { bytes: b, pages: [0, 4, 7, 1] }]), 'PAGE_RANGE');
+  assert.equal(e.message, 'Page index out of range 0-4');
+  assert.deepEqual(e.details, { index: 1, position: 2, page: 7, pageCount: 5 });
+  e = await expectCode(merge([{ bytes: a, pages: [0, 'x'] }]), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { index: 0, position: 1, page: null, pageCount: 3 });
+  e = await expectCode(merge([{ bytes: b }, { bytes: a, pages: '2-4' }]), 'PAGE_RANGE');
+  assert.equal(e.message, 'Page out of range 1-3');
+  assert.deepEqual(e.details, { index: 1, from: 2, to: 4, pageCount: 3 });
+  e = await expectCode(merge([{ bytes: a, pages: [] }]), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { index: 0, pageCount: 3 });
 });
 
 test('split: one document per group, 1-based pages reported', async () => {
@@ -114,6 +129,23 @@ test('organize: invalid ops -> PAGE_RANGE', async () => {
     { order: [0], rotate: [90] }, { order: [0], rotate: { 0: '90' } }]) {
     await expectCode(organize(src, ops), 'PAGE_RANGE');
   }
+});
+
+test('organize: PAGE_RANGE details (index = position in order, page = original index)', async () => {
+  const src = await fx.plainPdf(3);
+  let e = await expectCode(organize(src, { order: [2, 0, 5, 1] }), 'PAGE_RANGE');
+  assert.equal(e.message, 'order index out of range 0-2');
+  assert.deepEqual(e.details, { index: 2, page: 5, pageCount: 3 });
+  e = await expectCode(organize(src, { order: [1, -1] }), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { index: 1, page: -1, pageCount: 3 });
+  e = await expectCode(organize(src, { order: [0, '1'] }), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { index: 1, page: null, pageCount: 3 });
+  e = await expectCode(organize(src, { order: [] }), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { pageCount: 3 });
+  e = await expectCode(organize(src, { order: [0], rotate: { 4: 90 } }), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { page: 4, pageCount: 3 });
+  e = await expectCode(organize(src, { order: [0], rotate: { 1: 45 } }), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { page: 1, degrees: 45, pageCount: 3 });
 });
 
 test('sanitization: metadata, XMP, JS, actions, forms, attachments removed; safe URI link kept', async () => {
@@ -167,7 +199,7 @@ test('limits: file size, total size, file count (checked before parsing)', async
 
 test('limits: MAX_PAGES applies to the result only', async () => {
   const p1001 = await fx.plainPdf(1001);
-  assert.deepEqual(await pdfInfo(p1001), { pages: 1001, encrypted: false });
+  assert.deepEqual(await pdfInfo(p1001), { pages: 1001 });
   // a long input is fine when the result is small
   assert.equal((await pdfInfo(await merge([{ bytes: p1001, pages: '1-10' }]))).pages, 10);
   assert.equal((await split(p1001, '1001'))[0].pages[0], 1001);

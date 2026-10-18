@@ -142,29 +142,41 @@ function rangeGroups(ranges, count) {
   return groups;
 }
 
+/** Offending value for error details: only plain numbers, never arbitrary caller data. */
+const numOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
 function normalizePageSelection(pages, count, index) {
   if (pages === undefined || pages === null) return [...Array(count).keys()];
-  if (typeof pages === 'string') return parsePageRanges(pages, count).flat();
-  if (Array.isArray(pages)) {
-    if (pages.length === 0) fail('PAGE_RANGE', 'Empty page selection', { index });
-    for (const p of pages) {
-      if (!Number.isInteger(p) || p < 0 || p >= count) fail('PAGE_RANGE', `Page index out of range 0-${count - 1}`, { index });
+  if (typeof pages === 'string') {
+    try {
+      return parsePageRanges(pages, count).flat();
+    } catch (e) {
+      if (e instanceof PdfToolError) e.details = { index, ...(e.details || {}), pageCount: count };
+      throw e;
     }
+  }
+  if (Array.isArray(pages)) {
+    if (pages.length === 0) fail('PAGE_RANGE', 'Empty page selection', { index, pageCount: count });
+    pages.forEach((p, position) => {
+      if (!Number.isInteger(p) || p < 0 || p >= count) {
+        fail('PAGE_RANGE', `Page index out of range 0-${count - 1}`, { index, position, page: numOrNull(p), pageCount: count });
+      }
+    });
     return pages.slice();
   }
-  fail('PAGE_RANGE', 'pages must be a range string or an array of 0-based indexes', { index });
+  fail('PAGE_RANGE', 'pages must be a range string or an array of 0-based indexes', { index, pageCount: count });
 }
 
 /**
  * @param {Uint8Array} bytes
- * @returns {Promise<{pages: number, encrypted: false}>}
+ * @returns {Promise<{pages: number}>}
  * @throws PdfToolError PDF_ENCRYPTED for encrypted/password-protected files, PDF_INVALID, TOO_LARGE
  */
 export async function pdfInfo(bytes) {
   assertBytes(bytes);
   try {
     const { count } = await loadPdf(bytes);
-    return { pages: count, encrypted: false };
+    return { pages: count };
   } catch (e) {
     throw wrapUnknown(e);
   }
@@ -237,20 +249,21 @@ export async function organize(bytes, ops) {
     const { doc, count } = await loadPdf(bytes);
     const isIdx = (i) => Number.isInteger(i) && i >= 0 && i < count;
 
-    if (!Array.isArray(ops.order) || ops.order.length === 0) fail('PAGE_RANGE', 'order must be a non-empty array');
+    if (!Array.isArray(ops.order) || ops.order.length === 0) fail('PAGE_RANGE', 'order must be a non-empty array', { pageCount: count });
     checkPageLimit(ops.order.length);
-    for (const i of ops.order) {
-      if (!isIdx(i)) fail('PAGE_RANGE', `order index out of range 0-${count - 1}`);
-    }
+    ops.order.forEach((i, index) => {
+      if (!isIdx(i)) fail('PAGE_RANGE', `order index out of range 0-${count - 1}`, { index, page: numOrNull(i), pageCount: count });
+    });
     const final = ops.order.slice();
 
     const rot = new Map();
     if (ops.rotate !== undefined) {
-      if (!ops.rotate || typeof ops.rotate !== 'object' || Array.isArray(ops.rotate)) fail('PAGE_RANGE', 'rotate must be an object');
+      if (!ops.rotate || typeof ops.rotate !== 'object' || Array.isArray(ops.rotate)) fail('PAGE_RANGE', 'rotate must be an object', { pageCount: count });
       for (const [k, deg] of Object.entries(ops.rotate)) {
         const i = Number(k);
-        if (!/^\d+$/.test(k) || !isIdx(i)) fail('PAGE_RANGE', `rotate index out of range 0-${count - 1}`);
-        if (!Number.isInteger(deg) || deg % 90 !== 0) fail('PAGE_RANGE', 'rotation must be a multiple of 90');
+        const page = /^\d+$/.test(k) ? i : null;
+        if (page === null || !isIdx(i)) fail('PAGE_RANGE', `rotate index out of range 0-${count - 1}`, { page, pageCount: count });
+        if (!Number.isInteger(deg) || deg % 90 !== 0) fail('PAGE_RANGE', 'rotation must be a multiple of 90', { page, degrees: numOrNull(deg), pageCount: count });
         rot.set(i, deg);
       }
     }
@@ -268,6 +281,27 @@ export async function organize(bytes, ops) {
   } catch (e) {
     throw wrapUnknown(e);
   }
+}
+
+/** Fixed page sizes in points, portrait [width, height]. */
+export const PAGE_SIZES = Object.freeze({
+  A4: Object.freeze([595.28, 841.89]),
+  Letter: Object.freeze([612, 792]),
+});
+
+function imageOptions(options) {
+  if (options === undefined || options === null) return { pageSize: 'fit', margin: 0 };
+  if (typeof options !== 'object' || Array.isArray(options)) fail('PDF_INVALID', 'options must be an object');
+  const pageSize = options.pageSize === undefined ? 'fit' : options.pageSize;
+  if (pageSize !== 'fit' && !Object.hasOwn(PAGE_SIZES, pageSize)) {
+    fail('PDF_INVALID', "pageSize must be 'fit', 'A4' or 'Letter'", { option: 'pageSize' });
+  }
+  const margin = options.margin === undefined ? 0 : options.margin;
+  const maxMargin = pageSize === 'fit' ? MAX_PAGE_PT / 4 : Math.min(...PAGE_SIZES[pageSize]) / 2;
+  if (typeof margin !== 'number' || !Number.isFinite(margin) || margin < 0 || margin >= maxMargin) {
+    fail('PDF_INVALID', `margin must be a number of points, 0 <= margin < ${maxMargin}`, { option: 'margin', max: maxMargin });
+  }
+  return { pageSize, margin };
 }
 
 function detectImage(bytes) {
@@ -294,11 +328,19 @@ function withIndex(e, idx) {
  * JPEG: APP1 (EXIF/GPS, XMP), APP13, COM, non-ICC APP2, other vendor APPn and data after
  * EOI are removed without re-encoding; APP0, APP2 ICC_PROFILE and APP14 Adobe are kept.
  * PNG: only IHDR/PLTE/tRNS/IDAT/IEND are passed on (pdf-lib then decodes and re-encodes).
+ *
+ * Options (all optional; defaults keep the behaviour above):
+ *   pageSize: 'fit' (default, page = image size) | 'A4' (595.28 x 841.89 pt) |
+ *     'Letter' (612 x 792 pt). Fixed sizes are portrait; the image (after EXIF orientation)
+ *     is scaled up or down to fit inside the margins, aspect ratio preserved, centered.
+ *   margin: points on every side, default 0. With 'fit' the page grows by 2 * margin.
  * @param {{bytes: Uint8Array}[]} list
+ * @param {{pageSize?: 'fit'|'A4'|'Letter', margin?: number}} [options]
  * @returns {Promise<Uint8Array>}
  */
-export async function imagesToPdf(list) {
+export async function imagesToPdf(list, options) {
   assertList(list, 'images');
+  const { pageSize, margin } = imageOptions(options);
   const prepared = list.map((item, idx) => {
     const kind = detectImage(item.bytes);
     if (!kind) fail('UNSUPPORTED_IMAGE', `Item ${idx}: only JPEG and PNG are supported`, { index: idx });
@@ -325,14 +367,31 @@ export async function imagesToPdf(list) {
     } catch (e) {
       throw withIndex(e, idx);
     }
-    const scale = Math.min(1, MAX_PAGE_PT / size.width, MAX_PAGE_PT / size.height);
+    const swap = orientation >= 5;
+    // Display (post-orientation) size in pixels = points at scale 1.
+    const dw = swap ? size.height : size.width;
+    const dh = swap ? size.width : size.height;
+    let pageW;
+    let pageH;
+    let scale;
+    if (pageSize === 'fit') {
+      const room = MAX_PAGE_PT - 2 * margin;
+      scale = Math.min(1, room / dw, room / dh);
+      pageW = dw * scale + 2 * margin;
+      pageH = dh * scale + 2 * margin;
+    } else {
+      [pageW, pageH] = PAGE_SIZES[pageSize];
+      scale = Math.min((pageW - 2 * margin) / dw, (pageH - 2 * margin) / dh);
+    }
     const w = size.width * scale;
     const h = size.height * scale;
-    const swap = orientation >= 5;
-    const page = out.addPage(swap ? [h, w] : [w, h]);
+    const x = (pageW - dw * scale) / 2;
+    const y = (pageH - dh * scale) / 2;
+    const page = out.addPage([pageW, pageH]);
     const name = page.node.newXObject('Image', img.ref);
     page.pushOperators(
       pushGraphicsState(),
+      ...(x !== 0 || y !== 0 ? [concatTransformationMatrix(1, 0, 0, 1, x, y)] : []),
       concatTransformationMatrix(...orientationMatrix(orientation, w, h)),
       drawObject(name),
       popGraphicsState(),
