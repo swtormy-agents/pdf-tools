@@ -254,9 +254,35 @@ function deflateBomb(n) {
   return Buffer.concat([Buffer.from([0x78, 0x01]), Buffer.from(out), Buffer.alloc(4)]);
 }
 
+/**
+ * Zlib data that inflates to about `n` spaces, built from ONE byte-aligned fixed-Huffman block repeated as bytes, so
+ * multi-GB bombs (QA MCP case: ObjStm inflating to 6.2 GB) are built in ~100 ms. Block = 1 literal (first block only)
+ * or none, then M copies (length 258, distance 1), EOB; M = 1022 keeps every block a whole number of bytes.
+ */
+function deflateBombRepeated(n) {
+  const M = 1022;
+  const block = (lit) => {
+    const out = [];
+    let acc = 0, bits = 0;
+    const put = (v, len) => { acc |= v << bits; bits += len; while (bits >= 8) { out.push(acc & 0xff); acc >>>= 8; bits -= 8; } };
+    const putRev = (code, len) => { let r = 0; for (let k = 0; k < len; k++) r |= ((code >> k) & 1) << (len - 1 - k); put(r, len); };
+    put(0, 1); put(1, 2); // not final, fixed Huffman
+    if (lit) putRev(0x30 + 0x20, 8);
+    for (let k = 0; k < M; k++) { putRev(0xc5, 8); putRev(0, 5); }
+    putRev(0, 7);
+    assert.equal(bits, 0); // 3 + (8) + 13 * 1022 + 7 bits: whole bytes with and without the literal
+    return Buffer.from(out);
+  };
+  // first block: 3 + 8 + 13 * 1022 + 7 bits = 13304 bits = 1663 bytes, aligned as well
+  const first = block(true);
+  const rep = block(false);
+  const count = Math.ceil(n / (M * 258));
+  const fin = Buffer.from([0x03, 0x00]); // final fixed block with only EOB, then 0-padding
+  return Buffer.concat([Buffer.from([0x78, 0x01]), first, Buffer.concat(Array(count).fill(rep)), fin, Buffer.alloc(4)]);
+}
+
 /** Valid 1-page PDF plus an /ObjStm whose Flate data inflates to `n` bytes. */
-function objStmBombPdf(n) {
-  const z = deflateBomb(n);
+function objStmBombPdf(n, z = deflateBomb(n)) {
   const hdr = '9 0 ';
   const parts = [Buffer.from('%PDF-1.5\n')];
   const objs = [
@@ -296,4 +322,27 @@ test('decompression cap is per call over all inputs; below it object streams wor
   assert.equal((await pdfInfo(half)).pages, 1); // 300 MiB alone fits
   const e = await expectCode(merge([{ bytes: half }, { bytes: half }]), 'TOO_LARGE'); // 600 MiB together
   assert.equal(e.details.reason, 'decompressed');
+});
+
+test('QA MCP case: /ObjStm inflating to 6.2 GB is capped while PARSING -> TOO_LARGE fast, no full allocation', async () => {
+  const n = 6.2e9;
+  const z = deflateBombRepeated(n);
+  // sanity: the stream really inflates past the cap (first 600 MiB checked by streaming inflate, then aborted)
+  const { default: pako } = await import('pako');
+  let seen = 0;
+  const inf = new pako.Inflate({ chunkSize: 1 << 20 });
+  inf.onData = (c) => { seen += c.length; if (seen > 600 * 1024 * 1024) throw new Error('enough'); };
+  assert.throws(() => inf.push(z.subarray(0, 4 * 1024 * 1024), false), /enough/);
+  const bytes = objStmBombPdf(0, z);
+  assert.ok(bytes.length < 45 * 1024 * 1024, `fixture ${bytes.length} bytes`);
+  const rss0 = process.memoryUsage().rss;
+  const t0 = Date.now();
+  for (const run of [() => pdfInfo(bytes), () => merge([{ bytes }]), () => split(bytes, '1'), () => organize(bytes, { order: [0] })]) {
+    const e = await expectCode(run, 'TOO_LARGE');
+    assert.deepEqual(e.details, { reason: 'decompressed', limit: LIMITS.MAX_DECOMPRESSED_BYTES });
+  }
+  const ms = Date.now() - t0;
+  const grew = (process.memoryUsage().rss - rss0) / 1048576;
+  assert.ok(ms < 60_000, `took ${ms} ms`);
+  assert.ok(grew < 400, `rss grew by ${grew.toFixed(0)} MiB (6.2 GB were never allocated)`);
 });
