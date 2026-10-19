@@ -6,8 +6,10 @@ plus plain parameters and returns `Uint8Array` output.
 
 - No filesystem, no DOM, no network, no global state. Runs in browsers, Node >= 18 and workers.
 - ESM only, named exports only (no default export). TypeScript declarations included.
-- One runtime dependency: [pdf-lib](https://github.com/Hopding/pdf-lib) 1.17.1 (MIT),
-  pinned exactly. See [THIRD-PARTY.md](THIRD-PARTY.md).
+- Runtime dependencies: [pdf-lib](https://github.com/Hopding/pdf-lib) 1.17.1 (MIT) and
+  [pako](https://github.com/nodeca/pako) 1.0.11 (MIT AND Zlib, already a pdf-lib
+  dependency; used directly for the decompression cap), both pinned exactly. See
+  [THIRD-PARTY.md](THIRD-PARTY.md).
 - Outputs are always new documents, cleaned of metadata, scripts, forms and attachments
   (see [Security](#security)).
 
@@ -48,6 +50,19 @@ One output document per range group. `ranges` is a 1-based range string (`'1-3,5
 documents: pages 1-3 and page 5) or an array of inclusive 1-based `[from, to]` pairs.
 `pages` in each result lists the 1-based source pages it contains. There is no "every N
 pages" mode; build the ranges on the caller side.
+
+- Limits, all checked before any page is copied; `details.limit` names the limit hit:
+  - each part: at most `MAX_PAGES` (1000) pages, else `TOO_MANY_PAGES`
+    `{ limit: 'part', max: 1000, part, pages }` (0-based part index). A 2000-page input
+    split into `'1-1000,1001-2000'` works;
+  - all parts together (repeats counted): at most `MAX_SPLIT_TOTAL_PAGES` (5000), else
+    `TOO_MANY_PAGES` `{ limit: 'total', max: 5000, total }`; a long repeated spec such as
+    `'1-1000,1-1000,...'` stops as soon as the total passes the limit;
+  - at most `MAX_SPLIT_PARTS` (50) parts, else `TOO_MANY_FILES`
+    `{ limit: 'parts', max: 50, parts }`;
+  - reversed ranges (`'5-3'`, `[5, 3]`) -> `PAGE_RANGE` `{ from, to }`.
+- Open ranges work as in `parsePageRanges`: `'-3'` = pages 1-3, `'5-'` = page 5 to the
+  last page, `'-1'` = page 1.
 
 ### `organize(bytes: Uint8Array, ops: { order: number[], rotate?: { [index: number]: number } }): Promise<Uint8Array>`
 
@@ -101,9 +116,10 @@ applied (orientations 5-8 swap width and height).
 - Group separators: `,` and fullwidth `，` (U+FF0C).
 - Range dashes: `-`, en dash `–` (U+2013), `~`, fullwidth `～` (U+FF5E).
 - Whitespace (incl. U+3000) is ignored anywhere; empty groups (`1,,2`, trailing `,`) are skipped.
-- Open ends: `'8-'` = 8 to last page, `'-3'` = 1 to 3.
-- Syntax errors, reversed ranges (`4-2`), pages outside `1..pageCount`, or no group ->
-  `PAGE_RANGE`. More than `maxTotal` pages over all groups -> `TOO_MANY_PAGES`.
+- Open ranges are valid: `'-3'` = pages 1 to 3, `'5-'` = page 5 to the last page, `'-1'` = page 1. They are
+  still checked against `pageCount` (`'-11'` or `'11-'` with 10 pages -> `PAGE_RANGE`).
+- `PAGE_RANGE` only for: numbers outside `1..pageCount` (incl. `0`), reversed ranges
+  (`'5-3'`), or input that cannot be parsed (`'a'`, `'1-2-3'`, `'-'`, `'1.5'`, no group). More than `maxTotal` pages over all groups -> `TOO_MANY_PAGES`.
   Out-of-range and reversed errors carry `details` `{ from, to, pageCount }` / `{ from, to }`.
 
 ### Helpers
@@ -121,9 +137,12 @@ Frozen object, used by the core itself; there is no per-call override.
 |---|---|---|
 | `MAX_FILE_BYTES` | `100 * 1024 * 1024` | each input file (PDF or image) |
 | `MAX_TOTAL_BYTES` | `300 * 1024 * 1024` | all inputs of one call together |
-| `MAX_PAGES` | `1000` | pages of the RESULT (for `split`: all outputs together). Inputs may be longer |
+| `MAX_PAGES` | `1000` | pages of the RESULT: `merge` / `organize` output, each `split` part. Inputs may be longer (bounded by `MAX_FILE_BYTES`) |
+| `MAX_SPLIT_TOTAL_PAGES` | `5000` | `split`: pages of all parts together (repeats counted) |
+| `MAX_SPLIT_PARTS` | `50` | `split`: number of output parts |
 | `MAX_FILES` | `50` | items in `merge` / `imagesToPdf` |
 | `MAX_IMAGE_PIXELS` | `50_000_000` | width x height of each image, from the header |
+| `MAX_DECOMPRESSED_BYTES` | `500 * 1024 * 1024` | bytes decompressed from PDF streams during one call, all inputs together (object streams, xref streams, filters in front of DCTDecode images) |
 
 Byte and file-count limits are checked before anything is parsed.
 
@@ -143,11 +162,11 @@ Every failure is thrown as `class PdfToolError extends Error` with:
 | Code | When |
 |---|---|
 | `PDF_ENCRYPTED` | input PDF is encrypted / password-protected |
-| `PDF_INVALID` | not a PDF, broken PDF, no pages, or wrong argument type (bytes not a `Uint8Array`, empty list, bad `imagesToPdf` options) |
+| `PDF_INVALID` | not a PDF, broken PDF, no pages, or wrong argument type (bytes not a `Uint8Array`, empty list, bad `imagesToPdf` options); details `{ reason: 'image' }` when a JPEG image inside the PDF cannot be cleaned (see Security) |
 | `PAGE_RANGE` | bad range string, page/index out of range, bad `organize` ops or rotation |
-| `TOO_LARGE` | a file > `MAX_FILE_BYTES` or all files > `MAX_TOTAL_BYTES` |
-| `TOO_MANY_PAGES` | result would exceed `MAX_PAGES` |
-| `TOO_MANY_FILES` | more than `MAX_FILES` items |
+| `TOO_LARGE` | a file > `MAX_FILE_BYTES` or all files > `MAX_TOTAL_BYTES` (details `{ max }`), or decompressed PDF streams > `MAX_DECOMPRESSED_BYTES` (details `{ reason: 'decompressed', limit }`) |
+| `TOO_MANY_PAGES` | result (or one `split` part) would exceed `MAX_PAGES` (details `{ max }`; split part: `{ limit: 'part', max, part, pages }`); `split` parts together exceed `MAX_SPLIT_TOTAL_PAGES` (`{ limit: 'total', max, total }`); `parsePageRanges` groups exceed `maxTotal` (`{ max, total }`) |
+| `TOO_MANY_FILES` | more than `MAX_FILES` items, or `split` would produce more than `MAX_SPLIT_PARTS` parts (`{ limit: 'parts', max, parts }`) |
 | `IMAGE_TOO_LARGE` | image header says more than `MAX_IMAGE_PIXELS` |
 | `UNSUPPORTED_IMAGE` | not JPEG or PNG (by magic bytes) |
 | `IMAGE_INVALID` | JPEG/PNG signature present but the file is corrupt or cannot be decoded |
@@ -163,8 +182,30 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
   - catalog holds only `/Type` and `/Pages`: no XMP `/Metadata`, `/Names` (document
     JavaScript, embedded files), `/AcroForm`, `/OpenAction`, outlines.
 - Every copied page is cleaned **before** copying, so removed objects are never written:
-  - page keys `/AA`, `/Metadata`, `/PieceInfo`, `/B`, `/StructParents`, `/Thumb`, `/ID`,
-    `/PZ`, `/SeparationInfo` are removed;
+  - the page dict keeps only an ALLOWLIST of keys: `/Type`, `/Resources`, `/MediaBox`,
+    `/CropBox`, `/BleedBox`, `/TrimBox`, `/ArtBox`, `/Contents`, `/Rotate`, `/Annots`
+    (rebuilt, below), `/UserUnit`, `/Group`. Everything else (`/AA`, `/Metadata`,
+    `/PieceInfo`, `/AF`, `/Thumb`, `/B`, `/StructParents`, `/ID`, `/PZ`, `/SeparationInfo`,
+    private keys) is removed. Inherited `/Resources`, `/MediaBox`, `/CropBox`, `/Rotate`
+    are moved onto the page first and cleaned like the page's own;
+  - every `/Resources` dict reachable from the page (page, Form XObjects, tiling patterns,
+    Type3 fonts, soft-mask groups, recursively) keeps only `/Font`, `/XObject`,
+    `/ExtGState`, `/ColorSpace`, `/Pattern`, `/Shading`, `/ProcSet`. `/Properties` is
+    dropped: it only feeds marked / optional content, which has no effect without the
+    catalog `/OCProperties` and `/StructTreeRoot` (never copied), so rendering is unchanged;
+  - everything reachable from the kept keys is walked: `/AA`, `/A`, `/JS`, `/JavaScript`,
+    `/Launch`, `/OpenAction`, `/Next`, `/URI`, `/AF`, `/EF`, `/EmbeddedFile(s)`,
+    `/Metadata`, `/PieceInfo`, `/Thumb`, `/OPI`, `/Names`, `/AcroForm`, `/XFA`,
+    `/StructParent(s)`, `/Annots`, `/Dest` are removed from every dict and stream dict, and
+    any entry or array item that is an action dict, file specification, embedded file,
+    metadata stream, annotation or page-tree node is removed (array items become `null`);
+  - JPEG (DCTDecode) image streams, including soft masks, are cleaned with the same
+    `stripJpeg` as `imagesToPdf`: EXIF/GPS, XMP, IPTC, COM and other APPn are removed,
+    APP0, ICC `APP2` and Adobe `APP14` are kept, entropy-coded data is unchanged (no
+    re-encoding). If Flate/LZW/ASCII85/ASCIIHex/RunLength filters sit in front of
+    `DCTDecode`, they are decoded (under `MAX_DECOMPRESSED_BYTES`) and the stream is stored
+    as plain `/DCTDecode`. Any other chain, or a JPEG that cannot be parsed, fails closed
+    with `PDF_INVALID` `{ reason: 'image' }` instead of being copied with its metadata;
   - `/Annots` keeps only `Link` annotations whose action is a single `URI` action with an
     `http:`, `https:` or `mailto:` URI, rebuilt as a fresh minimal dict
     (`/Type /Subtype /Rect /Border /A`). Dropped: Widgets (form fields), anything with
@@ -173,6 +214,16 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     including deleted ones, into the file), markup annotations (author names, popups) and
     file attachments.
 - Images: see `imagesToPdf` (header-first size check, metadata removal).
+- Decompression bombs: pdf-lib inflates object streams and xref streams while parsing,
+  without limits. The core hooks the parser so these streams are first measured with a
+  streaming inflater (pako, 64 KiB chunks, output discarded) and only decoded when they fit
+  the remaining `MAX_DECOMPRESSED_BYTES` budget of the call; otherwise the call throws
+  `TOO_LARGE` `{ reason: 'decompressed', limit }` (a 1 GiB object stream fails in ~1.5 s
+  with ~200 MB peak RSS). Content streams are copied without being decoded.
+- Known limits (not cleaned): metadata inside JPEG 2000 (`JPXDecode`) boxes and inside
+  inline images (`BI ... ID ... EI` in content streams), and text in content streams
+  themselves. PNG decoding in `imagesToPdf` is bounded by `MAX_IMAGE_PIXELS`, not by
+  `MAX_DECOMPRESSED_BYTES`.
 
 Console output: on broken input pdf-lib writes parser warnings with `console.warn`
 (stderr). pdf-lib 1.17.1 has one `console.log` (stdout) call site, in its `es` and `cjs` builds:
@@ -199,6 +250,13 @@ hand-written PDF with a Standard-security `/Encrypt` dict in the trailer (pdf-li
 encrypt), PDFs with an object stream of garbage Flate data, a PDF with metadata, XMP, JavaScript, actions, a form field, page `/AA`,
 attachments and annotations, JPEGs with EXIF GPS and all 8 orientations, a JPEG with
 ICC/Adobe segments, a PNG with text/EXIF chunks, oversized image headers and corrupt bytes.
+The EXIF GPS canary is a synthetic, non-zero location (N 12°34'56.789", E 65°7'6.543").
+
+`test/qa-regression.test.mjs` replays the adversarial QA suite (encryption variants,
+JavaScript/Launch/URI tricks, attachments, XObject metadata, JPEGs with EXIF inside PDFs,
+broken/cyclic/deep PDFs, limits, ranges, image options) on the small synthetic files in
+`test/qa/fixtures/` (test-only, not in the npm package) and checks every output for
+leftover active content, metadata and JPEG APPn/COM segments.
 
 ## License
 

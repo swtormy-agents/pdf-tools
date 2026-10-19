@@ -39,9 +39,12 @@ export declare class PdfToolError extends Error {
 export declare const LIMITS: Readonly<{
   MAX_FILE_BYTES: number; // 100 * 1024 * 1024
   MAX_TOTAL_BYTES: number; // 300 * 1024 * 1024
-  MAX_PAGES: number; // 1000, result pages
+  MAX_PAGES: number; // 1000, result pages (merge/organize output, each split part)
+  MAX_SPLIT_TOTAL_PAGES: number; // 5000, split: all parts together
+  MAX_SPLIT_PARTS: number; // 50, split: number of parts
   MAX_FILES: number; // 50
   MAX_IMAGE_PIXELS: number; // 50_000_000
+  MAX_DECOMPRESSED_BYTES: number; // 500 * 1024 * 1024, per call; TOO_LARGE { reason: "decompressed", limit }
 }>;
 
 /** Encrypted / password-protected input throws PDF_ENCRYPTED instead of returning. */

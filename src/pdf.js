@@ -6,11 +6,14 @@ import {
   popGraphicsState,
   concatTransformationMatrix,
   drawObject,
+  PDFParser,
+  ParseSpeeds,
 } from 'pdf-lib';
 import { PdfToolError, fail } from './errors.js';
 import { LIMITS } from './limits.js';
 import { parsePageRanges } from './ranges.js';
-import { sanitizeSourcePage } from './sanitize.js';
+import { sanitizeSourcePage, newSanitizeState } from './sanitize.js';
+import { newBudget, guardParser, failDecompressed } from './decode.js';
 import { jpegSize, pngSize, stripJpeg, stripPng, jpegOrientation } from './images.js';
 
 // PDF user space limit (Acrobat): 14400 pt = 200 in.
@@ -49,15 +52,22 @@ function indexOfAscii(bytes, ascii) {
 }
 
 /**
- * Load with pdf-lib DEFAULT options (never ignoreEncryption). Encrypted -> PDF_ENCRYPTED,
- * any other parse failure -> PDF_INVALID.
+ * Load like PDFDocument.load with pdf-lib DEFAULT options (never ignoreEncryption), but
+ * with the parser hooked so object/xref streams are decoded under the per-call
+ * decompression budget (see decode.js). Budget exceeded -> TOO_LARGE
+ * { reason: 'decompressed', limit }, encrypted -> PDF_ENCRYPTED, any other parse failure
+ * -> PDF_INVALID.
  */
-async function loadPdf(bytes, index) {
+async function loadPdf(bytes, index, budget) {
   const details = index === undefined ? undefined : { index };
   let doc;
   try {
-    doc = await PDFDocument.load(bytes);
+    const parser = guardParser(PDFParser.forBytesWithOptions(bytes, ParseSpeeds.Slow, false, false), budget);
+    const context = await parser.parseDocument();
+    if (budget.exceeded) failDecompressed(budget);
+    doc = new PDFDocument(context, false, true);
   } catch (e) {
+    if (budget.exceeded) failDecompressed(budget);
     if (e instanceof EncryptedPDFError) fail('PDF_ENCRYPTED', 'PDF is encrypted or password-protected', details);
     // Parsing may fail before pdf-lib reaches its encryption check (e.g. encrypted object streams).
     if (indexOfAscii(bytes, '/Encrypt') !== -1) fail('PDF_ENCRYPTED', 'PDF is encrypted or password-protected', details);
@@ -71,10 +81,10 @@ async function loadPdf(bytes, index) {
     fail('PDF_INVALID', 'PDF page tree is broken', details);
   }
   if (count < 1) fail('PDF_INVALID', 'PDF has no pages', details);
-  return { doc, count };
+  return { doc, count, state: newSanitizeState(budget) };
 }
 
-/** MAX_PAGES applies to the RESULT only; input documents may be longer. */
+/** MAX_PAGES applies to the RESULT only (merge, organize; split: per part); inputs may be longer. */
 function checkPageLimit(resultPages) {
   if (resultPages > LIMITS.MAX_PAGES) {
     fail('TOO_MANY_PAGES', `Result would have more than ${LIMITS.MAX_PAGES} pages`, { max: LIMITS.MAX_PAGES });
@@ -108,10 +118,10 @@ async function saveOutput(doc) {
   return doc.save({ updateFieldAppearances: false, addDefaultPage: false });
 }
 
-async function copyInto(out, src, indexes) {
+async function copyInto(out, { doc: src, state }, indexes) {
   const pages = src.getPages();
   const unique = [...new Set(indexes)];
-  for (const i of unique) sanitizeSourcePage(pages[i]);
+  for (const i of unique) sanitizeSourcePage(pages[i], state);
   const copied = await out.copyPages(src, indexes);
   return copied.map((p) => out.addPage(p));
 }
@@ -121,24 +131,51 @@ function wrapUnknown(e) {
   return new PdfToolError('PDF_INVALID', 'PDF could not be processed');
 }
 
+/**
+ * Split groups, all limits checked BEFORE any page is copied. `details.limit` names the
+ * limit that was hit:
+ *   - pages over all parts together <= MAX_SPLIT_TOTAL_PAGES (repeats counted; parsing
+ *     stops as soon as it is passed) -> TOO_MANY_PAGES { limit: 'total', max, total };
+ *   - number of parts <= MAX_SPLIT_PARTS -> TOO_MANY_FILES { limit: 'parts', max, parts };
+ *   - pages of each part <= MAX_PAGES -> TOO_MANY_PAGES { limit: 'part', max, part, pages }
+ *     (part is 0-based).
+ */
 function rangeGroups(ranges, count) {
-  if (typeof ranges === 'string') return parsePageRanges(ranges, count, LIMITS.MAX_PAGES);
-  if (!Array.isArray(ranges) || ranges.length === 0) fail('PAGE_RANGE', 'ranges must be a string or a non-empty array of [from, to]');
-  const groups = [];
-  let total = 0;
-  for (const r of ranges) {
-    if (!Array.isArray(r) || r.length !== 2 || !Number.isInteger(r[0]) || !Number.isInteger(r[1])) {
-      fail('PAGE_RANGE', 'each range must be [from, to] with integer 1-based pages');
+  const limit = LIMITS.MAX_SPLIT_TOTAL_PAGES;
+  const tooManyTotal = (total) => fail('TOO_MANY_PAGES', `Parts together would have more than ${limit} pages`, { limit: 'total', max: limit, total });
+  let groups;
+  if (typeof ranges === 'string') {
+    try {
+      groups = parsePageRanges(ranges, count, limit);
+    } catch (e) {
+      if (e instanceof PdfToolError && e.code === 'TOO_MANY_PAGES') tooManyTotal(e.details.total);
+      throw e;
     }
-    const [from, to] = r;
-    if (from < 1 || to < 1 || from > count || to > count) fail('PAGE_RANGE', `Page out of range 1-${count}`, { from, to, pageCount: count });
-    if (from > to) fail('PAGE_RANGE', `Reversed page range ${from}-${to}`, { from, to });
-    total += to - from + 1;
-    checkPageLimit(total);
-    const g = [];
-    for (let p = from; p <= to; p++) g.push(p - 1);
-    groups.push(g);
+  } else {
+    if (!Array.isArray(ranges) || ranges.length === 0) fail('PAGE_RANGE', 'ranges must be a string or a non-empty array of [from, to]');
+    groups = [];
+    let total = 0;
+    for (const r of ranges) {
+      if (!Array.isArray(r) || r.length !== 2 || !Number.isInteger(r[0]) || !Number.isInteger(r[1])) {
+        fail('PAGE_RANGE', 'each range must be [from, to] with integer 1-based pages');
+      }
+      const [from, to] = r;
+      if (from < 1 || to < 1 || from > count || to > count) fail('PAGE_RANGE', `Page out of range 1-${count}`, { from, to, pageCount: count });
+      if (from > to) fail('PAGE_RANGE', `Reversed page range ${from}-${to}`, { from, to });
+      total += to - from + 1;
+      if (total > limit) tooManyTotal(total);
+      groups.push([from, to]);
+    }
+    groups = groups.map(([from, to]) => Array.from({ length: to - from + 1 }, (_, k) => from - 1 + k));
   }
+  if (groups.length > LIMITS.MAX_SPLIT_PARTS) {
+    fail('TOO_MANY_FILES', `More than ${LIMITS.MAX_SPLIT_PARTS} parts`, { limit: 'parts', max: LIMITS.MAX_SPLIT_PARTS, parts: groups.length });
+  }
+  groups.forEach((g, part) => {
+    if (g.length > LIMITS.MAX_PAGES) {
+      fail('TOO_MANY_PAGES', `Part ${part} would have more than ${LIMITS.MAX_PAGES} pages`, { limit: 'part', max: LIMITS.MAX_PAGES, part, pages: g.length });
+    }
+  });
   return groups;
 }
 
@@ -175,7 +212,7 @@ function normalizePageSelection(pages, count, index) {
 export async function pdfInfo(bytes) {
   assertBytes(bytes);
   try {
-    const { count } = await loadPdf(bytes);
+    const { count } = await loadPdf(bytes, undefined, newBudget());
     return { pages: count };
   } catch (e) {
     throw wrapUnknown(e);
@@ -192,13 +229,15 @@ export async function merge(list) {
   assertList(list, 'merge input');
   try {
     const out = await createOutput();
+    const budget = newBudget();
     let total = 0;
     for (let idx = 0; idx < list.length; idx++) {
-      const { doc, count } = await loadPdf(list[idx].bytes, idx);
+      const src = await loadPdf(list[idx].bytes, idx, budget);
+      const { count } = src;
       const sel = normalizePageSelection(list[idx].pages, count, idx);
       total += sel.length;
       checkPageLimit(total);
-      await copyInto(out, doc, sel);
+      await copyInto(out, src, sel);
     }
     return await saveOutput(out);
   } catch (e) {
@@ -217,13 +256,14 @@ export async function merge(list) {
 export async function split(bytes, ranges) {
   assertBytes(bytes);
   try {
-    const { doc, count } = await loadPdf(bytes);
-    // MAX_PAGES applies to the result: all output documents together.
+    const src = await loadPdf(bytes, undefined, newBudget());
+    const { count } = src;
+    // MAX_PAGES applies to each output part (see rangeGroups).
     const groups = rangeGroups(ranges, count);
     const results = [];
     for (const g of groups) {
       const out = await createOutput();
-      await copyInto(out, doc, g);
+      await copyInto(out, src, g);
       results.push({ pages: g.map((i) => i + 1), bytes: await saveOutput(out) });
     }
     return results;
@@ -246,7 +286,8 @@ export async function organize(bytes, ops) {
   assertBytes(bytes);
   if (!ops || typeof ops !== 'object') fail('PAGE_RANGE', 'ops must be an object with order');
   try {
-    const { doc, count } = await loadPdf(bytes);
+    const src = await loadPdf(bytes, undefined, newBudget());
+    const { count } = src;
     const isIdx = (i) => Number.isInteger(i) && i >= 0 && i < count;
 
     if (!Array.isArray(ops.order) || ops.order.length === 0) fail('PAGE_RANGE', 'order must be a non-empty array', { pageCount: count });
@@ -269,7 +310,7 @@ export async function organize(bytes, ops) {
     }
 
     const out = await createOutput();
-    const added = await copyInto(out, doc, final);
+    const added = await copyInto(out, src, final);
     final.forEach((orig, k) => {
       const d = rot.get(orig);
       if (!d) return;

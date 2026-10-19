@@ -9,6 +9,7 @@ const MAX_SPEC_LENGTH = 10_000;
  *   parsePageRanges('1-3,5', 10)  -> [[0, 1, 2], [4]]
  *   parsePageRanges('8-', 10)     -> [[7, 8, 9]]   (open end = last page)
  *   parsePageRanges('-2', 10)     -> [[0, 1]]      (open start = page 1)
+ *   parsePageRanges('-1', 10)     -> [[0]]         (page 1, not an error)
  *
  * Group separators: ',' and fullwidth '，' (U+FF0C).
  * Range dashes: '-', en dash '–' (U+2013), '~' and fullwidth '～' (U+FF5E).
@@ -49,7 +50,7 @@ export function parsePageRanges(spec, pageCount, maxTotal = LIMITS.MAX_PAGES) {
     }
     if (from > to) fail('PAGE_RANGE', `Reversed page range ${from}-${to}`, { from, to });
     total += to - from + 1;
-    if (total > maxTotal) fail('TOO_MANY_PAGES', `More than ${maxTotal} pages selected`, { max: maxTotal });
+    if (total > maxTotal) fail('TOO_MANY_PAGES', `More than ${maxTotal} pages selected`, { max: maxTotal, total });
     const g = [];
     for (let p = from; p <= to; p++) g.push(p - 1);
     groups.push(g);

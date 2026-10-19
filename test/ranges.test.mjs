@@ -34,3 +34,19 @@ test('total selected pages above MAX_PAGES -> TOO_MANY_PAGES', async () => {
   await expectCode(() => parsePageRanges(Array(101).fill('1-10').join(','), 10), 'TOO_MANY_PAGES');
   assert.equal(parsePageRanges(Array(100).fill('1-10').join(','), 10).flat().length, 1000);
 });
+
+test('open ranges are valid: "-N" = 1..N, "N-" = N..last, "-1" = page 1', () => {
+  assert.deepEqual(parsePageRanges('-1', 10), [[0]]);
+  assert.deepEqual(parsePageRanges('-3', 10), [[0, 1, 2]]);
+  assert.deepEqual(parsePageRanges('5-', 7), [[4, 5, 6]]);
+  assert.deepEqual(parsePageRanges('10-', 10), [[9]]);
+  assert.deepEqual(parsePageRanges('-10', 10), [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]]);
+  assert.deepEqual(parsePageRanges('-1,9-', 10), [[0], [8, 9]]);
+});
+
+test('open ranges still checked against the page count', async () => {
+  await expectCode(() => parsePageRanges('-11', 10), 'PAGE_RANGE');
+  await expectCode(() => parsePageRanges('11-', 10), 'PAGE_RANGE');
+  await expectCode(() => parsePageRanges('-0', 10), 'PAGE_RANGE');
+  await expectCode(() => parsePageRanges('--1', 10), 'PAGE_RANGE');
+});

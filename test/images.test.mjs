@@ -50,6 +50,7 @@ test('pdf-lib alone WOULD carry EXIF/GPS (reason for stripping)', async () => {
   await doc.embedJpg(fx.exifJpeg());
   const raw = await doc.save({ useObjectStreams: false });
   assert.ok(has(raw, 'EVIL-EXIF-DESC'));
+  assert.ok(fx.GPS_RATIONALS.some((v, k) => k % 2 === 0 && v !== 0), 'GPS canary is non-zero');
   assert.ok(has(raw, fx.gpsRationalBytes()));
 });
 
@@ -58,6 +59,7 @@ test('JPEG: EXIF/GPS, XMP, IPTC, MPF, COM, trailer stripped without re-encoding'
   const stripped = stripJpeg(src);
   for (const s of ['Exif', 'EVIL', 'Photoshop', 'MPF', 'xmpmeta']) assert.ok(!has(stripped, s), s);
   assert.ok(!has(stripped, fx.gpsRationalBytes()));
+  assert.ok(!has(stripped, fx.gpsRationalBytes(false, fx.GPS_RATIONALS.slice(6))), 'longitude gone too');
   // entropy-coded data and tables identical to the clean original => no re-encoding
   assert.deepEqual(Buffer.from(stripped), Buffer.from(fx.plainJpeg()));
 

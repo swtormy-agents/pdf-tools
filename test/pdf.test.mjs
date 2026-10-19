@@ -12,6 +12,9 @@ test('contract constants', () => {
     MAX_PAGES: 1000,
     MAX_FILES: 50,
     MAX_IMAGE_PIXELS: 50_000_000,
+    MAX_DECOMPRESSED_BYTES: 500 * 1024 * 1024,
+    MAX_SPLIT_TOTAL_PAGES: 5000,
+    MAX_SPLIT_PARTS: 50,
   });
   assert.ok(Object.isFrozen(LIMITS));
   assert.deepEqual([...ERROR_CODES], ['PDF_ENCRYPTED', 'PDF_INVALID', 'PAGE_RANGE', 'TOO_LARGE', 'TOO_MANY_PAGES',
@@ -208,10 +211,63 @@ test('limits: MAX_PAGES applies to the result only', async () => {
   await expectCode(merge([{ bytes: p1001 }]), 'TOO_MANY_PAGES');
   const p600 = await fx.plainPdf(600);
   await expectCode(merge([{ bytes: p600 }, { bytes: p600 }]), 'TOO_MANY_PAGES');
-  await expectCode(split(p600, '1-600,1-401'), 'TOO_MANY_PAGES');
+  // split: overlapping parts are fine while each part <= MAX_PAGES and total <= MAX_SPLIT_TOTAL_PAGES
+  assert.deepEqual((await split(p600, '1-600,1-401')).map((p) => p.pages.length), [600, 401]);
   await expectCode(organize(p1001, { order: [...Array(1001).keys()] }), 'TOO_MANY_PAGES');
   await expectCode(organize(await fx.plainPdf(1), { order: Array(1001).fill(0) }), 'TOO_MANY_PAGES'); // duplicates count
   assert.equal((await pdfInfo(await organize(await fx.plainPdf(1), { order: Array(1000).fill(0) }))).pages, 1000);
   // exactly at the limit is fine
   assert.equal((await pdfInfo(await merge([{ bytes: p600 }, { bytes: p600, pages: '1-400' }]))).pages, 1000);
+});
+
+test('split: MAX_PAGES applies to each part, not to the sum of parts', async () => {
+  const p2000 = await fx.plainPdf(2000);
+  const parts = await split(p2000, '1-1000,1001-2000');
+  assert.deepEqual(parts.map((p) => p.pages.length), [1000, 1000]);
+  assert.deepEqual(await Promise.all(parts.map(async (p) => (await pdfInfo(p.bytes)).pages)), [1000, 1000]);
+  assert.equal(parts[1].pages[0], 1001);
+  const pairs = await split(p2000, [[1, 1000], [1001, 2000]]);
+  assert.deepEqual(pairs.map((p) => p.pages.length), [1000, 1000]);
+  assert.equal((await split(p2000, [[1, 500], [1000, 1501]])).length, 2);
+  let e = await expectCode(split(p2000, '1-1001'), 'TOO_MANY_PAGES');
+  assert.deepEqual(e.details, { limit: 'part', max: 1000, part: 0, pages: 1001 });
+  e = await expectCode(split(p2000, [[1, 10], [500, 1500]]), 'TOO_MANY_PAGES');
+  assert.deepEqual(e.details, { limit: 'part', max: 1000, part: 1, pages: 1001 });
+});
+
+test('split: all parts together <= MAX_SPLIT_TOTAL_PAGES (5000), checked fast before copying', async () => {
+  const p1000 = await fx.plainPdf(1000);
+  const five = await split(p1000, Array(5).fill('1-1000').join(','));
+  assert.equal(five.length, 5);
+  let t0 = Date.now();
+  let e = await expectCode(split(p1000, Array(6).fill('1-1000').join(',')), 'TOO_MANY_PAGES');
+  assert.deepEqual(e.details, { limit: 'total', max: 5000, total: 6000 });
+  // a long repeated spec stops at the limit, long before building or copying anything
+  e = await expectCode(split(p1000, Array(1400).fill('1-1000').join(',')), 'TOO_MANY_PAGES');
+  assert.deepEqual(e.details, { limit: 'total', max: 5000, total: 6000 });
+  e = await expectCode(split(p1000, Array(1000).fill([1, 1000])), 'TOO_MANY_PAGES');
+  assert.deepEqual(e.details, { limit: 'total', max: 5000, total: 6000 });
+  e = await expectCode(split(p1000, '1-1000,1-1000,1-1000,1-1000,1-999,1-2'), 'TOO_MANY_PAGES');
+  assert.deepEqual(e.details, { limit: 'total', max: 5000, total: 5001 });
+  assert.ok(Date.now() - t0 < 2000, 'fails fast (page loading dominates)');
+});
+
+test('split: at most MAX_SPLIT_PARTS (50) parts -> TOO_MANY_FILES', async () => {
+  const p60 = await fx.plainPdf(60);
+  const spec = (n) => Array.from({ length: n }, (_, k) => String(k + 1)).join(',');
+  assert.equal((await split(p60, spec(50))).length, 50);
+  let e = await expectCode(split(p60, spec(51)), 'TOO_MANY_FILES');
+  assert.deepEqual(e.details, { limit: 'parts', max: 50, parts: 51 });
+  e = await expectCode(split(p60, Array.from({ length: 51 }, (_, k) => [k + 1, k + 1])), 'TOO_MANY_FILES');
+  assert.deepEqual(e.details, { limit: 'parts', max: 50, parts: 51 });
+});
+
+test('split: reversed ranges -> PAGE_RANGE; open ranges valid', async () => {
+  const p10 = await fx.plainPdf(10);
+  let e = await expectCode(split(p10, '5-3'), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { from: 5, to: 3 });
+  e = await expectCode(split(p10, [[5, 3]]), 'PAGE_RANGE');
+  assert.deepEqual(e.details, { from: 5, to: 3 });
+  const parts = await split(p10, '-3,5-,-1');
+  assert.deepEqual(parts.map((p) => p.pages), [[1, 2, 3], [5, 6, 7, 8, 9, 10], [1]]);
 });

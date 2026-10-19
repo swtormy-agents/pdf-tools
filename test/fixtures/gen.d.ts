@@ -11,10 +11,12 @@ export declare function truncatedPdf(): Uint8Array;
 /** Valid 1-page PDF plus an unreferenced /ObjStm with garbage FlateDecode data. */
 export declare function brokenFlatePdf(seed?: number): Uint8Array;
 export declare function plainJpeg(): Uint8Array;
-export declare function exifPayload(opts?: { orientation?: number; littleEndian?: boolean; gps?: boolean }): Uint8Array;
+export declare function exifPayload(opts?: { orientation?: number; littleEndian?: boolean; gps?: boolean; gpsRationals?: number[] }): Uint8Array;
 export declare function exifGpsPayload(): Uint8Array;
-export declare function gpsRationalBytes(littleEndian?: boolean): Uint8Array;
-export declare function exifJpeg(opts?: { orientation?: number; littleEndian?: boolean }): Uint8Array;
+/** Default synthetic, non-zero GPS rationals (lat d,m,s then lon d,m,s; numerator, denominator). */
+export declare const GPS_RATIONALS: readonly number[];
+export declare function gpsRationalBytes(littleEndian?: boolean, values?: number[]): Uint8Array;
+export declare function exifJpeg(opts?: { orientation?: number; littleEndian?: boolean; gpsRationals?: number[] }): Uint8Array;
 export declare function orientedJpeg(orientation: number, littleEndian?: boolean): Uint8Array;
 export declare function iccAdobeJpeg(): Uint8Array;
 export declare function jpegWithSize(width: number, height: number): Uint8Array;

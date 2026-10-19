@@ -151,10 +151,15 @@ function seg(marker, payload) {
 
 /**
  * APP1 EXIF payload ('Exif\0\0' + TIFF). IFD0 holds ImageDescription (EVIL-EXIF-DESC),
- * optional Orientation and a GPS IFD pointer; GPS IFD: N 0°0'0", E 0°0'0" (neutral Null Island).
- * @param {{orientation?: number, littleEndian?: boolean, gps?: boolean}} [opts]
+ * optional Orientation and a GPS IFD pointer; GPS IFD: synthetic N 12°34'56.789", E 65°7'6.543"
+ * (open Arabian Sea; non-zero so absence checks are meaningful) unless `gpsRationals` is
+ * given: 12 uint32 (lat d,m,s then lon d,m,s, each as numerator, denominator).
+ * @param {{orientation?: number, littleEndian?: boolean, gps?: boolean, gpsRationals?: number[]}} [opts]
  */
-export function exifPayload({ orientation, littleEndian = false, gps = true } = {}) {
+/** Default synthetic GPS rationals of exifPayload(): lat d,m,s then lon d,m,s (num, den). */
+export const GPS_RATIONALS = Object.freeze([12, 1, 34, 1, 56789, 1000, 65, 1, 7, 1, 6543, 1000]);
+
+export function exifPayload({ orientation, littleEndian = false, gps = true, gpsRationals } = {}) {
   const le = littleEndian;
   const buf = new Uint8Array(256);
   const dv = new DataView(buf.buffer);
@@ -197,7 +202,8 @@ export function exifPayload({ orientation, littleEndian = false, gps = true } = 
     ent(2, 3, 2, 2, 0, 'E'); // GPSLongitudeRef
     ent(3, 4, 5, 3, ratOff + 24); // GPSLongitude
     dv.setUint32(g + 2 + 48, 0, le);
-    const rats = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1];
+    const rats = gpsRationals || GPS_RATIONALS;
+    if (rats.length !== 12) throw new Error('gpsRationals must have 12 values');
     rats.forEach((v, k) => dv.setUint32(t + ratOff + k * 4, v, le));
     end = t + ratOff + rats.length * 4;
   }
@@ -207,11 +213,14 @@ export function exifPayload({ orientation, littleEndian = false, gps = true } = 
 /** Back-compat alias: big-endian EXIF with GPS, no orientation. */
 export const exifGpsPayload = () => exifPayload();
 
-/** The GPS latitude rationals as stored in exifGpsPayload(); must not appear in output. */
-export function gpsRationalBytes(littleEndian = false) {
-  const b = new Uint8Array(24);
+/**
+ * The GPS latitude rationals as stored in exifGpsPayload() (or the given 6 values, e.g.
+ * the first half of a custom gpsRationals); must not appear in output.
+ */
+export function gpsRationalBytes(littleEndian = false, values = GPS_RATIONALS.slice(0, 6)) {
+  const b = new Uint8Array(values.length * 4);
   const dv = new DataView(b.buffer);
-  [0, 1, 0, 1, 0, 1].forEach((v, k) => dv.setUint32(k * 4, v, littleEndian));
+  values.forEach((v, k) => dv.setUint32(k * 4, v, littleEndian));
   return b;
 }
 
@@ -227,7 +236,7 @@ export const KEEP_ADOBE_MARKER = 'Adobe';
 /**
  * 24x16 JPEG with APP1 EXIF (description + GPS, optional orientation), APP1 XMP, APP13
  * IPTC, APP2 MPF, COM and trailing data after EOI.
- * @param {{orientation?: number, littleEndian?: boolean}} [opts]
+ * @param {{orientation?: number, littleEndian?: boolean, gpsRationals?: number[]}} [opts]
  */
 export function exifJpeg(opts = {}) {
   const [head, rest] = splitAfterApp0(plainJpeg());

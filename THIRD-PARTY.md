@@ -1,7 +1,8 @@
 # Third-party software
 
-`@local-pdf-tools/core` has one direct runtime dependency, `pdf-lib`, pinned to an exact
-version. The full runtime dependency tree (from `package-lock.json`) is:
+`@local-pdf-tools/core` has two direct runtime dependencies, `pdf-lib` and `pako` (already
+a dependency of pdf-lib; used directly for the decompression cap), both pinned to exact
+versions. The full runtime dependency tree (from `package-lock.json`) is:
 
 | Package | Version | License | Copyright | Source |
 |---|---|---|---|---|
@@ -13,8 +14,6 @@ version. The full runtime dependency tree (from `package-lock.json`) is:
 
 Notes
 
-- `pako` is a port of zlib; its license file covers both the MIT port and the Zlib-licensed
-  original code.
 - `@pdf-lib/standard-fonts` contains metrics for the 14 PDF standard fonts. The core does not
   draw text, but the package is installed as a pdf-lib dependency.
 - Products that bundle the core (web pages, MCP server) must show these notices, e.g. on a
