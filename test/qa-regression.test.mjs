@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { PDFDocument, PDFName, PDFDict, PDFArray, PDFRawStream, PDFString, PDFHexString, decodePDFRawStream } from 'pdf-lib';
 import * as core from '../src/index.js';
 import * as fx from './fixtures/gen.mjs';
+import { deflateBombRepeated, objStmBombPdf } from './helpers.mjs';
 
 const F = new URL('./qa/fixtures/', import.meta.url);
 const rd = (n) => new Uint8Array(readFileSync(new URL(n, F)));
@@ -282,4 +283,62 @@ test('QA checker itself: flags the unsanitized fixtures (so a clean result means
     const { issues } = await checkOut(rd(`${n}.pdf`));
     assert.ok(issues.length > 0, `${n}: checker must report the raw fixture`);
   }
+});
+
+// --- QA aea0eb0 (v2): full suite.py 'v2:' set, fixtures in test/qa/fixtures/v2 (generator gen_variants.py, synthetic).
+const V2 = ['exif-indirect-subtype', 'exif-hex-flate-dct', 'exif-smask-nested-pattern', 'exif-midscan-trailer', 'xmeta-alternates-smask',
+  'af-form-privdata', 'privkeys-indirect-s', 'inherited-pages-af'];
+
+test('QA v2: leak variants (indirect /S /Type /Subtype, DCT chains, SMask/Pattern, private keys, inherited /AF) are clean in merge/split/organize', async () => {
+  const L = [];
+  for (const n of V2) {
+    const p = `v2/${n}.pdf`;
+    L.push([`v2:${n}:merge`, 'merge', one(p), 'ok'], [`v2:${n}:split`, 'split', { ...pdf(p), ranges: '1' }, 'ok'],
+      [`v2:${n}:organize`, 'organize', { ...pdf(p), ops: { order: [0, 0] } }, 'ok']);
+  }
+  await cases(L);
+});
+
+test('QA v2 blockers: Launch with indirect /S and /Type, EXIF with indirect /Subtype, private stream under a Form XObject', async () => {
+  const raw = (n) => latin1(rd(`v2/${n}.pdf`));
+  assert.match(raw('privkeys-indirect-s'), /calc\.exe/);
+  for (const [n, bad] of [['privkeys-indirect-s', ['calc.exe', 'cmd.exe', '/Launch', '/Win']], ['exif-indirect-subtype', ['Exif', 'GPS', 'LEAK']],
+    ['af-form-privdata', ['LEAK-PRIVATE-STREAM-PAYLOAD', 'PrivData']]]) {
+    const src = rd(`v2/${n}.pdf`);
+    for (const out of [await core.merge([{ bytes: src }]), (await core.split(src, '1'))[0].bytes, await core.organize(src, { order: [0] })]) {
+      const { doc } = await checkOut(out);
+      let text = latin1(out);
+      for (const [, o] of doc.context.enumerateIndirectObjects()) {
+        if (o instanceof PDFRawStream) { try { text += latin1(decodePDFRawStream(o).decode()); } catch { /* DCT */ } }
+      }
+      for (const b of bad) assert.ok(!text.includes(b), `${n}: ${b} in output`);
+    }
+  }
+});
+
+test('QA v2: limits (ObjStm bombs in split/organize, duplicate split ranges, open ranges) and ranges', async () => {
+  const bomb1g = objStmBombPdf(deflateBombRepeated(1024 * MB));
+  const bomb4g = objStmBombPdf(deflateBombRepeated(4096 * MB));
+  const p2000 = await fx.plainPdf(2000);
+  const plain = rd('plain-3.pdf');
+  const L = [
+    ['v2:bomb-objstm-1g:merge', 'merge', { items: [{ bytes: bomb1g }] }, 'TOO_LARGE'],
+    ['v2:bomb-objstm-4g:split', 'split', { file: bomb4g, ranges: '1' }, 'TOO_LARGE'],
+    ['v2:bomb-objstm-4g:organize', 'organize', { file: bomb4g, ops: { order: [0] } }, 'TOO_LARGE'],
+    ['v2:split-dup-1000x5', 'split', { file: p2000, ranges: Array(5).fill('1-1000').join(',') }, 'ok'],
+    ['v2:split-dup-total-5001', 'split', { file: p2000, ranges: Array(5).fill('1-1000').join(',') + ',1' }, 'TOO_MANY_PAGES'],
+    ['v2:split-dup-1x51', 'split', { file: plain, ranges: Array(51).fill('1').join(',') }, 'TOO_MANY_FILES'],
+    ['v2:split-dup-1x50', 'split', { file: plain, ranges: Array(50).fill('1').join(',') }, 'ok'],
+    ['v2:split-pairs-dup-total', 'split', { file: p2000, ranges: [...Array(5).fill([1, 1000]), [1, 1]] }, 'TOO_MANY_PAGES'],
+    ['v2:split-pairs-51', 'split', { file: plain, ranges: Array(51).fill([1, 1]) }, 'TOO_MANY_FILES'],
+    // suite.py expects TOO_MANY_PAGES; a >10 000-char range string is rejected earlier as unparseable (QA finding 4, LOW)
+    ['v2:split-huge-dup-string', 'split', { file: p2000, ranges: Array(3000).fill('1-2000').join(',') }, ['TOO_MANY_PAGES', 'PAGE_RANGE']],
+    ['v2:split-open-1001', 'split', { file: p2000, ranges: '1000-' }, 'TOO_MANY_PAGES'],
+    ['v2:split-open-head', 'split', { file: p2000, ranges: '-1000' }, 'ok'],
+  ];
+  for (const [spec, exp] of [['-3', 'ok'], ['3-', 'ok'], ['-1', 'ok'], ['2-', 'ok'], ['-4', 'PAGE_RANGE'], ['4-', 'PAGE_RANGE'], ['3-2', 'PAGE_RANGE'],
+    ['0-', 'PAGE_RANGE'], ['-0', 'PAGE_RANGE'], ['x', 'PAGE_RANGE'], ['1-2-', 'PAGE_RANGE'], ['--1', 'PAGE_RANGE']]) {
+    L.push([`v2:ranges:${JSON.stringify(spec)}`, 'ranges', { spec, count: 3 }, exp]);
+  }
+  await cases(L);
 });

@@ -33,6 +33,28 @@ const ACTION_TYPES = new Set(['GoTo', 'GoToR', 'GoToE', 'GoToDp', 'Launch', 'Thr
 const DROP_TYPES = new Set(['Action', 'Filespec', 'EmbeddedFile', 'Metadata', 'Annot', 'Catalog', 'Pages', 'Page',
   'Outlines', 'Sig', 'XRef', 'ObjStm']);
 
+// /Subtype values that only annotations (or XMP metadata streams) carry. Any dict with one
+// of these is dropped wherever it appears (page /Annots is rebuilt separately).
+const DROP_SUBTYPES = new Set(['XML', 'Text', 'Link', 'FreeText', 'Line', 'Square', 'Circle', 'Polygon', 'PolyLine',
+  'Highlight', 'Underline', 'Squiggly', 'StrikeOut', 'Stamp', 'Caret', 'Ink', 'Popup', 'FileAttachment', 'Sound', 'Movie',
+  'Widget', 'Screen', 'PrinterMark', 'TrapNet', 'Watermark', '3D', 'Redact', 'RichMedia', 'Projection']);
+
+// Per-type ALLOWLISTS for dicts below /Resources (QA aea0eb0 finding 3): only keys the
+// renderer needs are kept, everything else (private keys, /Ref, /OC, /F external file
+// streams, ...) is removed before walking.
+const STREAM_KEYS = ['Length', 'Filter', 'DecodeParms', 'DL'];
+const FONT_KEYS = new Set(['Type', 'Subtype', 'BaseFont', 'Name', 'FirstChar', 'LastChar', 'Widths', 'FontDescriptor',
+  'Encoding', 'ToUnicode', 'DescendantFonts', 'CIDSystemInfo', 'DW', 'W', 'DW2', 'W2', 'CIDToGIDMap', 'FontBBox',
+  'FontMatrix', 'CharProcs', 'Resources']);
+const FONT_DESCRIPTOR_KEYS = new Set(['Type', 'FontName', 'FontFamily', 'FontStretch', 'FontWeight', 'Flags', 'FontBBox',
+  'ItalicAngle', 'Ascent', 'Descent', 'Leading', 'CapHeight', 'XHeight', 'StemV', 'StemH', 'AvgWidth', 'MaxWidth',
+  'MissingWidth', 'FontFile', 'FontFile2', 'FontFile3', 'CharSet', 'Style', 'Lang', 'FD', 'CIDSet']);
+const EXTGSTATE_KEYS = new Set(['Type', 'LW', 'LC', 'LJ', 'ML', 'D', 'RI', 'OP', 'op', 'OPM', 'Font', 'BG', 'BG2', 'UCR',
+  'UCR2', 'TR', 'TR2', 'HT', 'HTO', 'FL', 'SM', 'SA', 'BM', 'SMask', 'CA', 'ca', 'AIS', 'TK', 'UseBlackPtComp']);
+const SMASK_KEYS = new Set(['Type', 'S', 'G', 'BC', 'TR']);
+const GROUP_KEYS = new Set(['Type', 'S', 'CS', 'I', 'K']);
+const FORM_KEYS = new Set(['Type', 'Subtype', 'FormType', 'BBox', 'Matrix', 'Resources', 'Group', ...STREAM_KEYS]);
+
 const SAFE_URI_SCHEMES = /^(https?:|mailto:)/i;
 
 function lookupDict(ctx, obj) {
@@ -42,6 +64,20 @@ function lookupDict(ctx, obj) {
   } catch {
     return undefined;
   }
+}
+
+/** Resolve a (chain of) indirect reference(s); undefined on failure or > 32 hops. */
+function safeLookup(ctx, v) {
+  let cur = v;
+  for (let k = 0; k < 32 && cur instanceof PDFRef; k++) {
+    try { cur = ctx.lookup(cur); } catch { return undefined; }
+  }
+  return cur instanceof PDFRef ? undefined : cur;
+}
+
+/** Read dict key `k`, resolving indirect references. Use this for EVERY value compared. */
+function resolve(ctx, d, k) {
+  return d ? safeLookup(ctx, d.get(PDFName.of(k))) : undefined;
 }
 
 function numbers(ctx, obj, len) {
@@ -76,12 +112,11 @@ function uriText(ctx, obj) {
 function safeLink(ctx, annotObj) {
   const a = lookupDict(ctx, annotObj);
   if (!a) return undefined;
-  const subtype = a.get(PDFName.of('Subtype'));
-  if (subtype !== PDFName.of('Link')) return undefined;
+  if (resolve(ctx, a, 'Subtype') !== PDFName.of('Link')) return undefined;
   if (a.has(PDFName.of('AA')) || a.has(PDFName.of('Dest'))) return undefined;
   const action = lookupDict(ctx, a.get(PDFName.of('A')));
   if (!action) return undefined;
-  if (action.get(PDFName.of('S')) !== PDFName.of('URI')) return undefined;
+  if (resolve(ctx, action, 'S') !== PDFName.of('URI')) return undefined;
   if (action.has(PDFName.of('Next'))) return undefined;
   const uri = uriText(ctx, action.get(PDFName.of('URI')));
   if (!uri || !SAFE_URI_SCHEMES.test(uri.trim())) return undefined;
@@ -108,27 +143,21 @@ function dictOf(o) {
 }
 
 /** True for objects that must never be reachable from an output page. */
-function isDangerous(o) {
+function isDangerous(ctx, o) {
   const d = dictOf(o);
   if (!d) return false;
-  const type = nameOf(d.get(PDFName.of('Type')));
+  const type = nameOf(resolve(ctx, d, 'Type'));
   if (type && DROP_TYPES.has(type)) return true;
-  const s = nameOf(d.get(PDFName.of('S')));
+  const s = nameOf(resolve(ctx, d, 'S'));
   if (s && ACTION_TYPES.has(s)) return true;
+  const st = nameOf(resolve(ctx, d, 'Subtype'));
+  if (st && DROP_SUBTYPES.has(st)) return true;
   if (d.has(PDFName.of('EF')) || d.has(PDFName.of('JS'))) return true;
   return false;
 }
 
-function safeLookup(ctx, v) {
-  let cur = v;
-  for (let k = 0; k < 32 && cur instanceof PDFRef; k++) {
-    try { cur = ctx.lookup(cur); } catch { return undefined; }
-  }
-  return cur instanceof PDFRef ? undefined : cur;
-}
-
 function filterNames(ctx, d) {
-  const f = safeLookup(ctx, d.get(PDFName.of('Filter')));
+  const f = resolve(ctx, d, 'Filter');
   if (f === undefined) return [];
   if (f instanceof PDFName) return [f.decodeText()];
   if (f instanceof PDFArray) {
@@ -158,13 +187,15 @@ function sanitizeJpegStream(ctx, stream, budget) {
   const filters = filterNames(ctx, d);
   const dct = filters.indexOf('DCTDecode');
   if (dct === -1) return;
+  // Any stream with DCTDecode anywhere is treated as a JPEG, whatever its /Subtype
+  // (missing, indirect, or not /Image): it is cleaned or the call fails closed.
   if (dct !== filters.length - 1 || !filters.slice(0, -1).every((f) => JPEG_PREFILTERS.has(f))) {
     fail('PDF_INVALID', 'Unsupported filter chain on JPEG image', { reason: 'image' });
   }
   let bytes = stream.contents;
   let dctParms;
   if (filters.length > 1) {
-    const parms = safeLookup(ctx, d.get(PDFName.of('DecodeParms')));
+    const parms = resolve(ctx, d, 'DecodeParms');
     const pre = ctx.obj({});
     pre.set(PDFName.of('Filter'), ctx.obj(filters.slice(0, -1).map((f) => PDFName.of(f))));
     if (parms instanceof PDFArray) {
@@ -180,7 +211,7 @@ function sanitizeJpegStream(ctx, stream, budget) {
       fail('PDF_INVALID', 'JPEG image stream could not be decoded', { reason: 'image' });
     }
   } else {
-    const parms = safeLookup(ctx, d.get(PDFName.of('DecodeParms')));
+    const parms = resolve(ctx, d, 'DecodeParms');
     dctParms = parms instanceof PDFArray ? (parms.size() ? parms.get(0) : undefined) : parms;
   }
   let stripped;
@@ -195,51 +226,87 @@ function sanitizeJpegStream(ctx, stream, budget) {
   stream.contents = stripped;
 }
 
+/** Which per-type allowlist applies to `obj` (reached with `role`), or undefined. */
+function allowlistFor(ctx, obj, role) {
+  const d = dictOf(obj);
+  const type = nameOf(resolve(ctx, d, 'Type'));
+  const sub = nameOf(resolve(ctx, d, 'Subtype'));
+  if (role === 'font' || type === 'Font') return FONT_KEYS;
+  if (type === 'FontDescriptor' || role === 'fontdescriptor') return FONT_DESCRIPTOR_KEYS;
+  if (role === 'extgstate' || type === 'ExtGState') return EXTGSTATE_KEYS;
+  if (role === 'smask' || type === 'Mask') return SMASK_KEYS;
+  if (role === 'group' || type === 'Group') return GROUP_KEYS;
+  if (obj instanceof PDFStream && sub === 'Form') return FORM_KEYS;
+  return undefined;
+}
+
+/** Role of the child reached via `key` from a parent with `role` / allowlist `list`. */
+function childRole(k, role, list) {
+  if (role === 'resources') {
+    if (k === 'Font') return 'fontmap';
+    if (k === 'ExtGState') return 'gsmap';
+    return undefined;
+  }
+  if (role === 'fontmap') return 'font';
+  if (role === 'gsmap') return 'extgstate';
+  if (k === 'Resources') return 'resources';
+  if (k === 'Group') return 'group';
+  if (list === EXTGSTATE_KEYS && k === 'SMask') return 'smask';
+  if (list === FONT_KEYS && k === 'FontDescriptor') return 'fontdescriptor';
+  if (list === FONT_KEYS && k === 'DescendantFonts') return 'fontarray';
+  return undefined;
+}
+
 /**
  * Walk everything reachable from `root` (iteratively: no recursion depth issues), in place:
  *  - every /Resources dict is reduced to RESOURCE_KEYS;
+ *  - Font, FontDescriptor, ExtGState, soft-mask, transparency-group and Form XObject dicts
+ *    are reduced to their per-type allowlists;
  *  - FORBIDDEN_KEYS are deleted from every dict / stream dict;
  *  - entries and array items that are action dicts, file specs, embedded files, metadata
- *    streams, annotations or page-tree nodes are deleted (arrays: replaced by null);
- *  - DCTDecode image streams are stripped of APPn/COM metadata.
- * `state.seen` is shared per source document so shared resources are processed once.
+ *    streams, annotations or page-tree nodes are deleted (arrays: replaced by null). All
+ *    names compared (/Type, /S, /Subtype, /Filter...) are resolved through indirect refs;
+ *  - every stream with a DCTDecode filter is stripped of APPn/COM metadata.
+ * `state.seen` is shared per source document so shared objects are processed once per role.
  */
-function sanitizeGraph(ctx, root, rootIsResources, state) {
-  const stack = [[root, rootIsResources]];
+function sanitizeGraph(ctx, root, rootRole, state) {
+  const stack = [[root, rootRole]];
   while (stack.length) {
-    const [item, asResources] = stack.pop();
+    const [item, role] = stack.pop();
     const obj = safeLookup(ctx, item);
     if (obj === undefined) continue;
-    const seen = asResources ? state.seenRes : state.seen;
     if (!(obj instanceof PDFDict || obj instanceof PDFArray || obj instanceof PDFStream)) continue;
+    const rk = role || '';
+    let seen = state.seen.get(rk);
+    if (!seen) state.seen.set(rk, (seen = new WeakSet()));
     if (seen.has(obj)) continue;
     seen.add(obj);
     if (obj instanceof PDFArray) {
+      const itemRole = role === 'fontarray' ? 'font' : undefined;
       for (let k = 0; k < obj.size(); k++) {
         const v = obj.get(k);
-        if (isDangerous(safeLookup(ctx, v))) obj.set(k, PDFNull);
-        else stack.push([v, false]);
+        if (isDangerous(ctx, safeLookup(ctx, v))) obj.set(k, PDFNull);
+        else stack.push([v, itemRole]);
       }
       continue;
     }
     const d = dictOf(obj);
-    if (obj instanceof PDFRawStream && nameOf(d.get(PDFName.of('Subtype'))) === 'Image') {
-      sanitizeJpegStream(ctx, obj, state.budget);
-    }
+    if (obj instanceof PDFRawStream) sanitizeJpegStream(ctx, obj, state.budget);
+    const list = role === 'resources' ? RESOURCE_KEYS : allowlistFor(ctx, obj, role);
     for (const [key, v] of d.entries()) {
       const k = key.decodeText();
-      if (asResources && !RESOURCE_KEYS.has(k)) { d.delete(key); continue; }
+      if (list && !list.has(k)) { d.delete(key); continue; }
       if (FORBIDDEN_KEYS.has(k)) { d.delete(key); continue; }
       const target = safeLookup(ctx, v);
-      if (isDangerous(target)) { d.delete(key); continue; }
-      stack.push([v, k === 'Resources']);
+      if (isDangerous(ctx, target)) { d.delete(key); continue; }
+      stack.push([v, childRole(k, role, list)]);
     }
   }
 }
 
 /** Per-source-document sanitizer state. */
 export function newSanitizeState(budget) {
-  return { budget, seen: new WeakSet(), seenRes: new WeakSet() };
+  return { budget, seen: new Map() };
 }
 
 /**
@@ -277,8 +344,8 @@ export function sanitizeSourcePage(page, state) {
   for (const [key, v] of node.entries()) {
     const k = key.decodeText();
     if (k === 'Parent' || k === 'Type') continue;
-    if (isDangerous(safeLookup(ctx, v))) { node.delete(key); continue; }
-    sanitizeGraph(ctx, v, k === 'Resources', state);
+    if (isDangerous(ctx, safeLookup(ctx, v))) { node.delete(key); continue; }
+    sanitizeGraph(ctx, v, k === 'Resources' ? 'resources' : k === 'Group' ? 'group' : undefined, state);
   }
   if (kept.length) node.set(annotsKey, ctx.obj(kept));
 }

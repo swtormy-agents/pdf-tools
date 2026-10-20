@@ -75,3 +75,46 @@ export async function assertClean(bytes) {
   }
   return { doc, text };
 }
+
+/**
+ * Zlib data that inflates to about `n` spaces, built from ONE byte-aligned fixed-Huffman block repeated as bytes, so
+ * multi-GB bombs (QA MCP case: ObjStm inflating to 6.2 GB) are built in ~100 ms. Block = 1 literal (first block only)
+ * or none, then M copies (length 258, distance 1), EOB; M = 1022 keeps every block a whole number of bytes.
+ */
+export function deflateBombRepeated(n) {
+  const M = 1022;
+  const block = (lit) => {
+    const out = [];
+    let acc = 0, bits = 0;
+    const put = (v, len) => { acc |= v << bits; bits += len; while (bits >= 8) { out.push(acc & 0xff); acc >>>= 8; bits -= 8; } };
+    const putRev = (code, len) => { let r = 0; for (let k = 0; k < len; k++) r |= ((code >> k) & 1) << (len - 1 - k); put(r, len); };
+    put(0, 1); put(1, 2); // not final, fixed Huffman
+    if (lit) putRev(0x30 + 0x20, 8);
+    for (let k = 0; k < M; k++) { putRev(0xc5, 8); putRev(0, 5); }
+    putRev(0, 7);
+    assert.equal(bits, 0); // 3 + (8) + 13 * 1022 + 7 bits: whole bytes with and without the literal
+    return Buffer.from(out);
+  };
+  // first block: 3 + 8 + 13 * 1022 + 7 bits = 13304 bits = 1663 bytes, aligned as well
+  const first = block(true);
+  const rep = block(false);
+  const count = Math.ceil(n / (M * 258));
+  const fin = Buffer.from([0x03, 0x00]); // final fixed block with only EOB, then 0-padding
+  return Buffer.concat([Buffer.from([0x78, 0x01]), first, Buffer.concat(Array(count).fill(rep)), fin, Buffer.alloc(4)]);
+}
+
+/** Valid 1-page PDF plus an /ObjStm whose Flate data is `z`. */
+export function objStmBombPdf(z) {
+  const hdr = '9 0 ';
+  const parts = [Buffer.from('%PDF-1.5\n')];
+  const objs = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>\nendobj\n',
+  ];
+  for (const o of objs) parts.push(Buffer.from(o));
+  parts.push(Buffer.from(`4 0 obj\n<< /Type /ObjStm /N 1 /First ${hdr.length} /Length ${z.length} /Filter /FlateDecode >>\nstream\n`), z, Buffer.from('\nendstream\nendobj\n'));
+  parts.push(Buffer.from('trailer\n<< /Root 1 0 R /Size 5 >>\n%%EOF\n'));
+  return new Uint8Array(Buffer.concat(parts));
+}
+

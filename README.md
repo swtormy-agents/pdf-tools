@@ -193,13 +193,34 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     `/ExtGState`, `/ColorSpace`, `/Pattern`, `/Shading`, `/ProcSet`. `/Properties` is
     dropped: it only feeds marked / optional content, which has no effect without the
     catalog `/OCProperties` and `/StructTreeRoot` (never copied), so rendering is unchanged;
+  - dicts below `/Resources` keep only per-type ALLOWLISTS of keys (private and unknown
+    keys are removed, including any stream or dict they point to):
+    - Font: `/Type /Subtype /BaseFont /Name /FirstChar /LastChar /Widths /FontDescriptor
+      /Encoding /ToUnicode /DescendantFonts /CIDSystemInfo /DW /W /DW2 /W2 /CIDToGIDMap
+      /FontBBox /FontMatrix /CharProcs /Resources`;
+    - FontDescriptor: `/Type /FontName /FontFamily /FontStretch /FontWeight /Flags
+      /FontBBox /ItalicAngle /Ascent /Descent /Leading /CapHeight /XHeight /StemV /StemH
+      /AvgWidth /MaxWidth /MissingWidth /FontFile /FontFile2 /FontFile3 /CharSet /Style
+      /Lang /FD /CIDSet`;
+    - ExtGState: `/Type /LW /LC /LJ /ML /D /RI /OP /op /OPM /Font /BG /BG2 /UCR /UCR2 /TR
+      /TR2 /HT /HTO /FL /SM /SA /BM /SMask /CA /ca /AIS /TK /UseBlackPtComp`; its soft-mask
+      dict: `/Type /S /G /BC /TR`;
+    - Form XObject: `/Type /Subtype /FormType /BBox /Matrix /Resources /Group /Length
+      /Filter /DecodeParms /DL` (so `/Ref`, `/OC`, `/F` external streams, `/LastModified`,
+      `/Measure`, `/PtData` and private keys are removed);
+    - transparency group (page and Form `/Group`): `/Type /S /CS /I /K`.
+    Image XObjects, color spaces, patterns, shadings and other dicts are not
+    key-allowlisted; they get only the forbidden-key and dangerous-object removal below;
   - everything reachable from the kept keys is walked: `/AA`, `/A`, `/JS`, `/JavaScript`,
     `/Launch`, `/OpenAction`, `/Next`, `/URI`, `/AF`, `/EF`, `/EmbeddedFile(s)`,
     `/Metadata`, `/PieceInfo`, `/Thumb`, `/OPI`, `/Names`, `/AcroForm`, `/XFA`,
     `/StructParent(s)`, `/Annots`, `/Dest` are removed from every dict and stream dict, and
     any entry or array item that is an action dict, file specification, embedded file,
-    metadata stream, annotation or page-tree node is removed (array items become `null`);
-  - JPEG (DCTDecode) image streams, including soft masks, are cleaned with the same
+    metadata stream, annotation or page-tree node is removed (array items become `null`).
+    `/Type`, `/S`, `/Subtype` and `/Filter` are resolved through indirect references before
+    they are compared, so `/S 10 0 R` pointing to `/Launch` is caught like `/S /Launch`;
+  - every stream whose filter chain contains `DCTDecode` (whatever its `/Subtype`:
+    image, soft mask, missing or indirect) is cleaned with the same
     `stripJpeg` as `imagesToPdf`: EXIF/GPS, XMP, IPTC, COM and other APPn are removed,
     APP0, ICC `APP2` and Adobe `APP14` are kept, entropy-coded data is unchanged (no
     re-encoding). If Flate/LZW/ASCII85/ASCIIHex/RunLength filters sit in front of
