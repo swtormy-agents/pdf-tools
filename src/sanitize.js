@@ -86,6 +86,19 @@ function safeLookup(ctx, v) {
   return cur instanceof PDFRef ? undefined : cur;
 }
 
+/**
+ * Strict variant used by the graph walker: a chain that cannot be resolved (lookup error)
+ * or is longer than 32 hops fails closed with PDF_INVALID, so nothing un-walked is copied.
+ */
+function strictLookup(ctx, v) {
+  let cur = v;
+  for (let k = 0; k < 32 && cur instanceof PDFRef; k++) {
+    try { cur = ctx.lookup(cur); } catch { fail('PDF_INVALID', 'Unresolvable reference', { reason: 'refchain' }); }
+  }
+  if (cur instanceof PDFRef) fail('PDF_INVALID', 'Reference chain too deep', { reason: 'refchain' });
+  return cur;
+}
+
 /** Read dict key `k`, resolving indirect references. Use this for EVERY value compared. */
 function resolve(ctx, d, k) {
   return d ? safeLookup(ctx, d.get(PDFName.of(k))) : undefined;
@@ -266,6 +279,7 @@ function childRole(k, role, list) {
     if (k === 'Font') return 'fontmap';
     if (k === 'ExtGState') return 'gsmap';
     if (k === 'ColorSpace') return 'csmap';
+    if (k === 'XObject') return 'xobjmap';
     return undefined;
   }
   if (role === 'fontmap') return 'font';
@@ -294,11 +308,18 @@ function childRole(k, role, list) {
  *  - every stream with a DCTDecode filter is stripped of APPn/COM metadata.
  * `state.seen` is shared per source document so shared objects are processed once per role.
  */
+/** Only Image and Form XObject streams are kept (no /PS, no missing or unknown /Subtype). */
+function validXObject(ctx, t) {
+  if (!(t instanceof PDFStream)) return false;
+  const sub = nameOf(resolve(ctx, t.dict, 'Subtype'));
+  return sub === 'Image' || sub === 'Form';
+}
+
 function sanitizeGraph(ctx, root, rootRole, state) {
   const stack = [[root, rootRole]];
   while (stack.length) {
     const [item, role] = stack.pop();
-    const obj = safeLookup(ctx, item);
+    const obj = strictLookup(ctx, item);
     if (obj === undefined) continue;
     if (!(obj instanceof PDFDict || obj instanceof PDFArray || obj instanceof PDFStream)) continue;
     const rk = role || '';
@@ -310,7 +331,7 @@ function sanitizeGraph(ctx, root, rootRole, state) {
       const itemRole = role === 'fontarray' ? 'font' : role === 'cs' || role === 'cselem' ? 'cselem' : undefined;
       for (let k = 0; k < obj.size(); k++) {
         const v = obj.get(k);
-        if (isDangerous(ctx, safeLookup(ctx, v))) obj.set(k, PDFNull);
+        if (isDangerous(ctx, strictLookup(ctx, v))) obj.set(k, PDFNull);
         else stack.push([v, itemRole]);
       }
       continue;
@@ -322,8 +343,9 @@ function sanitizeGraph(ctx, root, rootRole, state) {
       const k = key.decodeText();
       if (list && !list.has(k)) { d.delete(key); continue; }
       if (FORBIDDEN_KEYS.has(k)) { d.delete(key); continue; }
-      const target = safeLookup(ctx, v);
+      const target = strictLookup(ctx, v);
       if (isDangerous(ctx, target)) { d.delete(key); continue; }
+      if (role === 'xobjmap' && !validXObject(ctx, target)) { d.delete(key); continue; }
       stack.push([v, childRole(k, role, list)]);
     }
   }
@@ -369,7 +391,7 @@ export function sanitizeSourcePage(page, state) {
   for (const [key, v] of node.entries()) {
     const k = key.decodeText();
     if (k === 'Parent' || k === 'Type') continue;
-    if (isDangerous(ctx, safeLookup(ctx, v))) { node.delete(key); continue; }
+    if (isDangerous(ctx, strictLookup(ctx, v))) { node.delete(key); continue; }
     sanitizeGraph(ctx, v, k === 'Resources' ? 'resources' : k === 'Group' ? 'group' : undefined, state);
   }
   if (kept.length) node.set(annotsKey, ctx.obj(kept));
