@@ -1,7 +1,10 @@
 import { fail } from './errors.js';
 import { LIMITS } from './limits.js';
 
-const MAX_SPEC_LENGTH = 10_000;
+// Specs longer than this (1 MB of text) are rejected as PAGE_RANGE before parsing. Below it,
+// a long spec is parsed group by group and fails with TOO_MANY_PAGES as soon as the running
+// page total passes the limit, so repeated groups never build more than the limit.
+export const MAX_SPEC_LENGTH = 1_000_000;
 
 /**
  * Parse a 1-based page range spec into groups of 0-based page indexes.
@@ -25,7 +28,7 @@ const MAX_SPEC_LENGTH = 10_000;
 export function parsePageRanges(spec, pageCount, maxTotal = LIMITS.MAX_PAGES) {
   if (typeof spec !== 'string') fail('PAGE_RANGE', 'Page range must be a string');
   if (!Number.isInteger(pageCount) || pageCount < 1) fail('PAGE_RANGE', 'Document has no pages');
-  if (spec.length > MAX_SPEC_LENGTH) fail('PAGE_RANGE', 'Page range is too long');
+  if (spec.length > MAX_SPEC_LENGTH) fail('PAGE_RANGE', `Page range is too long (max ${MAX_SPEC_LENGTH} characters)`, { maxLength: MAX_SPEC_LENGTH });
   const norm = spec
     .replace(/\s+/gu, '')
     .replace(/\uFF0C/gu, ',')

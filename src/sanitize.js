@@ -53,6 +53,17 @@ const EXTGSTATE_KEYS = new Set(['Type', 'LW', 'LC', 'LJ', 'ML', 'D', 'RI', 'OP',
   'UCR2', 'TR', 'TR2', 'HT', 'HTO', 'FL', 'SM', 'SA', 'BM', 'SMask', 'CA', 'ca', 'AIS', 'TK', 'UseBlackPtComp']);
 const SMASK_KEYS = new Set(['Type', 'S', 'G', 'BC', 'TR']);
 const GROUP_KEYS = new Set(['Type', 'S', 'CS', 'I', 'K']);
+const IMAGE_KEYS = new Set(['Type', 'Subtype', 'Width', 'Height', 'ColorSpace', 'BitsPerComponent', 'Intent', 'ImageMask',
+  'Mask', 'Decode', 'Interpolate', 'SMask', 'SMaskInData', 'Matte', ...STREAM_KEYS]);
+const ICC_KEYS = new Set(['N', 'Alternate', 'Range', ...STREAM_KEYS]);
+const CAL_KEYS = new Set(['WhitePoint', 'BlackPoint', 'Gamma', 'Matrix', 'Range']);
+const DEVICEN_ATTR_KEYS = new Set(['Subtype', 'Colorants', 'Process', 'MixingHints']);
+const PATTERN_KEYS = new Set(['Type', 'PatternType', 'PaintType', 'TilingType', 'BBox', 'XStep', 'YStep', 'Resources',
+  'Matrix', 'Shading', 'ExtGState', ...STREAM_KEYS]);
+const SHADING_KEYS = new Set(['ShadingType', 'ColorSpace', 'Background', 'BBox', 'AntiAlias', 'Coords', 'Domain', 'Function',
+  'Extend', 'Matrix', 'BitsPerCoordinate', 'BitsPerComponent', 'BitsPerFlag', 'Decode', 'VerticesPerRow', ...STREAM_KEYS]);
+const FUNCTION_KEYS = new Set(['FunctionType', 'Domain', 'Range', 'Size', 'BitsPerSample', 'Order', 'Encode', 'Decode',
+  'C0', 'C1', 'N', 'Functions', 'Bounds', ...STREAM_KEYS]);
 const FORM_KEYS = new Set(['Type', 'Subtype', 'FormType', 'BBox', 'Matrix', 'Resources', 'Group', ...STREAM_KEYS]);
 
 const SAFE_URI_SCHEMES = /^(https?:|mailto:)/i;
@@ -237,6 +248,15 @@ function allowlistFor(ctx, obj, role) {
   if (role === 'smask' || type === 'Mask') return SMASK_KEYS;
   if (role === 'group' || type === 'Group') return GROUP_KEYS;
   if (obj instanceof PDFStream && sub === 'Form') return FORM_KEYS;
+  if (obj instanceof PDFStream && sub === 'Image') return IMAGE_KEYS;
+  if (d.has(PDFName.of('PatternType'))) return PATTERN_KEYS;
+  if (d.has(PDFName.of('ShadingType'))) return SHADING_KEYS;
+  if (d.has(PDFName.of('FunctionType'))) return FUNCTION_KEYS;
+  if (role === 'cselem') {
+    if (obj instanceof PDFStream && d.has(PDFName.of('N'))) return ICC_KEYS;
+    if (d.has(PDFName.of('WhitePoint'))) return CAL_KEYS;
+    if (d.has(PDFName.of('Colorants')) || d.has(PDFName.of('Process')) || d.has(PDFName.of('MixingHints'))) return DEVICEN_ATTR_KEYS;
+  }
   return undefined;
 }
 
@@ -245,10 +265,14 @@ function childRole(k, role, list) {
   if (role === 'resources') {
     if (k === 'Font') return 'fontmap';
     if (k === 'ExtGState') return 'gsmap';
+    if (k === 'ColorSpace') return 'csmap';
     return undefined;
   }
   if (role === 'fontmap') return 'font';
   if (role === 'gsmap') return 'extgstate';
+  if (role === 'csmap') return 'cs';
+  if (k === 'ColorSpace' || k === 'CS' || k === 'Alternate') return 'cs';
+  if (list === DEVICEN_ATTR_KEYS && k === 'Colorants') return 'csmap';
   if (k === 'Resources') return 'resources';
   if (k === 'Group') return 'group';
   if (list === EXTGSTATE_KEYS && k === 'SMask') return 'smask';
@@ -260,7 +284,8 @@ function childRole(k, role, list) {
 /**
  * Walk everything reachable from `root` (iteratively: no recursion depth issues), in place:
  *  - every /Resources dict is reduced to RESOURCE_KEYS;
- *  - Font, FontDescriptor, ExtGState, soft-mask, transparency-group and Form XObject dicts
+ *  - Image, ColorSpace parameter (ICC, Cal/Lab, DeviceN attributes), Pattern, Shading, Function,
+ *    Font, FontDescriptor, ExtGState, soft-mask, transparency-group and Form XObject dicts
  *    are reduced to their per-type allowlists;
  *  - FORBIDDEN_KEYS are deleted from every dict / stream dict;
  *  - entries and array items that are action dicts, file specs, embedded files, metadata
@@ -282,7 +307,7 @@ function sanitizeGraph(ctx, root, rootRole, state) {
     if (seen.has(obj)) continue;
     seen.add(obj);
     if (obj instanceof PDFArray) {
-      const itemRole = role === 'fontarray' ? 'font' : undefined;
+      const itemRole = role === 'fontarray' ? 'font' : role === 'cs' || role === 'cselem' ? 'cselem' : undefined;
       for (let k = 0; k < obj.size(); k++) {
         const v = obj.get(k);
         if (isDangerous(ctx, safeLookup(ctx, v))) obj.set(k, PDFNull);

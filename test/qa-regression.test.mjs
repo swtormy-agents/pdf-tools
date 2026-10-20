@@ -331,8 +331,8 @@ test('QA v2: limits (ObjStm bombs in split/organize, duplicate split ranges, ope
     ['v2:split-dup-1x50', 'split', { file: plain, ranges: Array(50).fill('1').join(',') }, 'ok'],
     ['v2:split-pairs-dup-total', 'split', { file: p2000, ranges: [...Array(5).fill([1, 1000]), [1, 1]] }, 'TOO_MANY_PAGES'],
     ['v2:split-pairs-51', 'split', { file: plain, ranges: Array(51).fill([1, 1]) }, 'TOO_MANY_FILES'],
-    // suite.py expects TOO_MANY_PAGES; a >10 000-char range string is rejected earlier as unparseable (QA finding 4, LOW)
-    ['v2:split-huge-dup-string', 'split', { file: p2000, ranges: Array(3000).fill('1-2000').join(',') }, ['TOO_MANY_PAGES', 'PAGE_RANGE']],
+    // QA finding 4 (LOW): 21 000-char duplicated spec -> TOO_MANY_PAGES once the running total passes 5000
+    ['v2:split-huge-dup-string', 'split', { file: p2000, ranges: Array(3000).fill('1-2000').join(',') }, 'TOO_MANY_PAGES'],
     ['v2:split-open-1001', 'split', { file: p2000, ranges: '1000-' }, 'TOO_MANY_PAGES'],
     ['v2:split-open-head', 'split', { file: p2000, ranges: '-1000' }, 'ok'],
   ];
@@ -341,4 +341,51 @@ test('QA v2: limits (ObjStm bombs in split/organize, duplicate split ranges, ope
     L.push([`v2:ranges:${JSON.stringify(spec)}`, 'ranges', { spec, count: 3 }, exp]);
   }
   await cases(L);
+});
+
+// --- v3 (follow-up on 006ee6a): fixtures in test/qa/fixtures/v3 (gen.mjs there).
+test('QA v3: split spec length cap is 1 000 000 chars (PAGE_RANGE above it), long duplicated specs below it -> TOO_MANY_PAGES', async () => {
+  const p2000 = await fx.plainPdf(2000);
+  const huge = Array(3000).fill('1-2000').join(',');
+  await assert.rejects(core.split(p2000, huge), (e) => e.code === 'TOO_MANY_PAGES' && e.details.limit === 'total' || e.code === 'TOO_MANY_PAGES');
+  const tooLong = '1,'.repeat(500_001);
+  assert.ok(tooLong.length > 1_000_000);
+  await assert.rejects(core.split(p2000, tooLong), (e) => e.code === 'PAGE_RANGE' && e.details.maxLength === 1_000_000);
+  assert.throws(() => core.parsePageRanges(tooLong, 3), (e) => e.code === 'PAGE_RANGE');
+});
+
+test('QA v3: ObjStm bomb with an indirect /Type (resolved backwards or forwards) -> TOO_LARGE decompressed, fast', async () => {
+  for (const n of ['objstm-bomb-indirect-type-back', 'objstm-bomb-indirect-type-fwd']) {
+    const bytes = rd(`v3/${n}.pdf`);
+    const t0 = Date.now();
+    for (const runIt of [() => core.pdfInfo(bytes), () => core.merge([{ bytes }]), () => core.split(bytes, '1'), () => core.organize(bytes, { order: [0] })]) {
+      await assert.rejects(runIt(), (e) => e.code === 'TOO_LARGE' && e.details.reason === 'decompressed' && e.details.limit === core.LIMITS.MAX_DECOMPRESSED_BYTES, n);
+    }
+    assert.ok(Date.now() - t0 < 30_000, `${n} took ${Date.now() - t0} ms`);
+  }
+});
+
+test('QA v3: private keys on Image, ICCBased, Separation/DeviceN tint functions, DeviceN attrs, Lab, Shading and Patterns are removed', async () => {
+  const src = rd('v3/privkeys-image-cs-pattern-shading.pdf');
+  assert.match(latin1(src), /LEAK-PRIVATE-STREAM-PAYLOAD/);
+  for (const out of [await core.merge([{ bytes: src }]), (await core.split(src, '1'))[0].bytes, await core.organize(src, { order: [0] })]) {
+    const { issues, doc } = await checkOut(out);
+    assert.deepEqual(issues, []);
+    let text = latin1(out);
+    let images = 0;
+    for (const [, o] of doc.context.enumerateIndirectObjects()) {
+      text += `\n${o instanceof PDFRawStream ? o.dict.toString() : o.toString()}`;
+      if (!(o instanceof PDFRawStream)) continue;
+      if (o.dict.get(PDFName.of('Subtype')) === PDFName.of('Image')) {
+        images++;
+        assert.deepEqual(o.dict.keys().map((k) => k.decodeText()).sort(), ['BitsPerComponent', 'ColorSpace', 'Height', 'Length', 'Subtype', 'Type', 'Width']);
+      }
+      try { text += latin1(decodePDFRawStream(o).decode()); } catch { /* ignore */ }
+    }
+    assert.equal(images, 1);
+    for (const b of ['LEAK', 'PrivData', 'XLeak', '/OC ', '/Alternates', '/StructParent', '/ID ']) assert.ok(!text.includes(b), `${b} in output`);
+    for (const keep of ['/ICCBased', '/Separation', '/DeviceN', '/Lab', '/ShadingType', '/PatternType', '/FunctionType', '/WhitePoint', '/Colorants']) {
+      assert.ok(text.includes(keep), `${keep} kept`);
+    }
+  }
 });

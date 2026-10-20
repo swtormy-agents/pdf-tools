@@ -27,7 +27,8 @@ test('invalid ranges -> PAGE_RANGE', async () => {
     await expectCode(() => parsePageRanges(spec, 10), 'PAGE_RANGE');
   }
   await expectCode(() => parsePageRanges('1', 0), 'PAGE_RANGE');
-  await expectCode(() => parsePageRanges('1,'.repeat(6000), 10), 'PAGE_RANGE'); // too long
+  await expectCode(() => parsePageRanges('1,'.repeat(500_001), 10), 'PAGE_RANGE'); // too long (> MAX_SPEC_LENGTH 1 000 000 chars)
+  await expectCode(() => parsePageRanges('1,'.repeat(6000), 10), 'TOO_MANY_PAGES'); // long but valid: limit by page total
 });
 
 test('total selected pages above MAX_PAGES -> TOO_MANY_PAGES', async () => {

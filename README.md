@@ -57,7 +57,9 @@ pages" mode; build the ranges on the caller side.
     split into `'1-1000,1001-2000'` works;
   - all parts together (repeats counted): at most `MAX_SPLIT_TOTAL_PAGES` (5000), else
     `TOO_MANY_PAGES` `{ limit: 'total', max: 5000, total }`; a long repeated spec such as
-    `'1-1000,1-1000,...'` stops as soon as the total passes the limit;
+    `'1-1000,1-1000,...'` stops as soon as the total passes the limit. A range string longer
+    than 1 000 000 characters is rejected up front with `PAGE_RANGE`
+    `{ maxLength: 1000000 }`; anything shorter is parsed and limited by its page total;
   - at most `MAX_SPLIT_PARTS` (50) parts, else `TOO_MANY_FILES`
     `{ limit: 'parts', max: 50, parts }`;
   - reversed ranges (`'5-3'`, `[5, 3]`) -> `PAGE_RANGE` `{ from, to }`.
@@ -163,7 +165,7 @@ Every failure is thrown as `class PdfToolError extends Error` with:
 |---|---|
 | `PDF_ENCRYPTED` | input PDF is encrypted / password-protected |
 | `PDF_INVALID` | not a PDF, broken PDF, no pages, or wrong argument type (bytes not a `Uint8Array`, empty list, bad `imagesToPdf` options); details `{ reason: 'image' }` when a JPEG image inside the PDF cannot be cleaned (see Security) |
-| `PAGE_RANGE` | bad range string, page/index out of range, bad `organize` ops or rotation |
+| `PAGE_RANGE` | bad range string (malformed, or longer than 1 000 000 characters: `{ maxLength }`), page/index out of range, bad `organize` ops or rotation |
 | `TOO_LARGE` | a file > `MAX_FILE_BYTES` or all files > `MAX_TOTAL_BYTES` (details `{ max }`), or decompressed PDF streams > `MAX_DECOMPRESSED_BYTES` (details `{ reason: 'decompressed', limit }`) |
 | `TOO_MANY_PAGES` | result (or one `split` part) would exceed `MAX_PAGES` (details `{ max }`; split part: `{ limit: 'part', max, part, pages }`); `split` parts together exceed `MAX_SPLIT_TOTAL_PAGES` (`{ limit: 'total', max, total }`); `parsePageRanges` groups exceed `maxTotal` (`{ max, total }`) |
 | `TOO_MANY_FILES` | more than `MAX_FILES` items, or `split` would produce more than `MAX_SPLIT_PARTS` parts (`{ limit: 'parts', max, parts }`) |
@@ -208,9 +210,24 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     - Form XObject: `/Type /Subtype /FormType /BBox /Matrix /Resources /Group /Length
       /Filter /DecodeParms /DL` (so `/Ref`, `/OC`, `/F` external streams, `/LastModified`,
       `/Measure`, `/PtData` and private keys are removed);
-    - transparency group (page and Form `/Group`): `/Type /S /CS /I /K`.
-    Image XObjects, color spaces, patterns, shadings and other dicts are not
-    key-allowlisted; they get only the forbidden-key and dangerous-object removal below;
+    - transparency group (page and Form `/Group`): `/Type /S /CS /I /K`;
+    - Image XObject (also soft masks / stencil masks): `/Type /Subtype /Width /Height
+      /ColorSpace /BitsPerComponent /Intent /ImageMask /Mask /Decode /Interpolate /SMask
+      /SMaskInData /Matte /Length /Filter /DecodeParms /DL` (so `/Alternates`, `/Name`,
+      `/Metadata`, `/OPI`, `/OC`, `/ID`, `/StructParent` and private keys are removed);
+    - color space parameters: ICCBased stream `/N /Alternate /Range /Length /Filter
+      /DecodeParms /DL`; CalGray/CalRGB/Lab dict `/WhitePoint /BlackPoint /Gamma /Matrix
+      /Range`; DeviceN attributes `/Subtype /Colorants /Process /MixingHints`;
+    - Pattern: `/Type /PatternType /PaintType /TilingType /BBox /XStep /YStep /Resources
+      /Matrix /Shading /ExtGState` (+ stream keys);
+    - Shading: `/ShadingType /ColorSpace /Background /BBox /AntiAlias /Coords /Domain
+      /Function /Extend /Matrix /BitsPerCoordinate /BitsPerComponent /BitsPerFlag /Decode
+      /VerticesPerRow` (+ stream keys);
+    - Function (tint transforms, shading functions): `/FunctionType /Domain /Range /Size
+      /BitsPerSample /Order /Encode /Decode /C0 /C1 /N /Functions /Bounds` (+ stream keys).
+    Other dicts (DeviceN `/Process` and `/MixingHints` contents, Type3 `/CharProcs` and
+    `/Encoding` dicts, ...) are not key-allowlisted; they get only the forbidden-key and
+    dangerous-object removal below;
   - everything reachable from the kept keys is walked: `/AA`, `/A`, `/JS`, `/JavaScript`,
     `/Launch`, `/OpenAction`, `/Next`, `/URI`, `/AF`, `/EF`, `/EmbeddedFile(s)`,
     `/Metadata`, `/PieceInfo`, `/Thumb`, `/OPI`, `/Names`, `/AcroForm`, `/XFA`,
@@ -236,7 +253,9 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     file attachments.
 - Images: see `imagesToPdf` (header-first size check, metadata removal).
 - Decompression bombs: pdf-lib inflates object streams and xref streams while parsing,
-  without limits. The core hooks the parser so these streams are first measured with a
+  without limits. `/Type` is resolved if it is an indirect reference; a stream whose
+  `/Type` is a reference that cannot be resolved yet is treated the same way (decoded under
+  the budget), so no parse-time inflation escapes the cap. The core hooks the parser so these streams are first measured with a
   streaming inflater (pako, 64 KiB chunks, output discarded) and only decoded when they fit
   the remaining `MAX_DECOMPRESSED_BYTES` budget of the call; otherwise the call throws
   `TOO_LARGE` `{ reason: 'decompressed', limit }` (a 1 GiB object stream fails in ~1.5 s

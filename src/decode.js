@@ -1,4 +1,4 @@
-import { PDFName, PDFRawStream, PDFDict, PDFArray, decodePDFRawStream } from 'pdf-lib';
+import { PDFName, PDFRawStream, PDFDict, PDFArray, PDFRef, decodePDFRawStream } from 'pdf-lib';
 import pako from 'pako';
 import { fail } from './errors.js';
 import { LIMITS } from './limits.js';
@@ -112,8 +112,17 @@ export function guardParser(parser, budget) {
   parser.parseObject = function guardedParseObject(...args) {
     const obj = parseObject.apply(this, args);
     if (obj instanceof PDFRawStream) {
-      const type = obj.dict.get(PDFName.of('Type'));
-      if ((type === PDFName.of('ObjStm') || type === PDFName.of('XRef')) && obj.dict.has(PDFName.of('Filter'))) {
+      // /Type may be an indirect ref (pdf-lib's parser resolves it with lookup, so a stream
+      // with /Type 7 0 R -> /ObjStm IS inflated by pdf-lib). Resolve it the same way; if it
+      // is a ref that cannot be resolved (yet), treat it as a parse-time stream too: it is
+      // decoded here under the budget, so nothing can be inflated without being counted.
+      let type = obj.dict.get(PDFName.of('Type'));
+      let unresolved = false;
+      if (type instanceof PDFRef) {
+        try { type = obj.dict.context.lookup(type); } catch { type = undefined; }
+        if (type === undefined || type instanceof PDFRef) unresolved = true;
+      }
+      if ((unresolved || type === PDFName.of('ObjStm') || type === PDFName.of('XRef')) && obj.dict.has(PDFName.of('Filter'))) {
         const decoded = boundedDecode(obj.dict, obj.contents, budget);
         obj.dict.delete(PDFName.of('Filter'));
         obj.dict.delete(PDFName.of('DecodeParms'));
