@@ -195,8 +195,10 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     `/ExtGState`, `/ColorSpace`, `/Pattern`, `/Shading`, `/ProcSet`. `/Properties` is
     dropped: it only feeds marked / optional content, which has no effect without the
     catalog `/OCProperties` and `/StructTreeRoot` (never copied), so rendering is unchanged;
-  - dicts below `/Resources` keep only per-type ALLOWLISTS of keys (private and unknown
-    keys are removed, including any stream or dict they point to):
+  - for dictionaries recognised by type, dicts below `/Resources` keep only per-type
+    ALLOWLISTS of keys (private and unknown keys are removed, including any stream or dict
+    they point to); dictionaries not recognised by type are kept as described in the
+    'Other page-description data' paragraph below:
     - Font: `/Type /Subtype /BaseFont /Name /FirstChar /LastChar /Widths /FontDescriptor
       /Encoding /ToUnicode /DescendantFonts /CIDSystemInfo /DW /W /DW2 /W2 /CIDToGIDMap
       /FontBBox /FontMatrix /CharProcs /Resources`;
@@ -211,7 +213,8 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
       /Filter /DecodeParms /DL` (so `/Ref`, `/OC`, `/F` external streams, `/LastModified`,
       `/Measure`, `/PtData` and private keys are removed);
     - transparency group (page and Form `/Group`): `/Type /S /CS /I /K`;
-    - Image XObject (also soft masks / stencil masks): `/Type /Subtype /Width /Height
+    - Image XObject (for dictionaries recognised by type, also soft masks / stencil
+      masks with `/Subtype /Image`): `/Type /Subtype /Width /Height
       /ColorSpace /BitsPerComponent /Intent /ImageMask /Mask /Decode /Interpolate /SMask
       /SMaskInData /Matte /Length /Filter /DecodeParms /DL` (so `/Alternates`, `/Name`,
       `/Metadata`, `/OPI`, `/OC`, `/ID`, `/StructParent` and private keys are removed);
@@ -245,7 +248,9 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     9. page content streams, Form XObject and tiling Pattern content, and non-JPEG image
        sample data (including JPEG 2000 boxes, see Known limits).
     Other page-description data (geometry boxes, graphics-state parameters, font
-    descriptors, soft masks, transfer functions) is also kept; only active content
+    descriptors, soft masks, transfer functions, Shading functions, ColorSpace
+    parameters, unrecognised fonts and masks such as `/SMask` or `/Mask` without
+    `/Subtype` or an ExtGState `/Font` font without `/Type`) is also kept; only active content
     (JavaScript, actions, launch, forms/widgets) and the document/image metadata listed
     elsewhere in this section are removed;
   - everything reachable from the kept keys is walked: `/AA`, `/A`, `/JS`, `/JavaScript`,
@@ -258,8 +263,8 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     they are compared, so `/S 10 0 R` pointing to `/Launch` is caught like `/S /Launch`.
     A reference that cannot be followed because its chain is longer than 32 hops or cyclic
     anywhere in the walked graph fails closed with `PDF_INVALID` `{ reason: 'refchain' }`;
-    references to missing objects are treated as null and dropped, as the PDF standard
-    requires (ISO 32000-1, 7.3.10); nothing that was not walked is copied;
+    references to missing objects are treated as null (the reference may remain, with no
+    data), as the PDF standard requires (ISO 32000-1, 7.3.10); nothing that was not walked is copied;
   - every stream whose filter chain contains `DCTDecode` (whatever its `/Subtype`:
     image, soft mask, missing or indirect) is cleaned with the same
     `stripJpeg` as `imagesToPdf`: EXIF/GPS, XMP, IPTC, COM and other APPn are removed,
