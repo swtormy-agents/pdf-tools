@@ -230,7 +230,7 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     are removed;
   - residual non-metadata streams and dicts that are KEPT because rendering needs them,
     with only the forbidden-key and dangerous-object removal below (their bytes are copied
-    as-is and could carry private data). This list is exact and complete:
+    as-is and could carry private data). Kept data includes, for example:
     1. font programs: FontDescriptor `/FontFile`, `/FontFile2`, `/FontFile3` streams;
     2. Font `/ToUnicode` CMap streams;
     3. Indexed colour space lookup table (string or stream);
@@ -244,6 +244,10 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
        PostScript calculator code) and Shading stream data (mesh vertices);
     9. page content streams, Form XObject and tiling Pattern content, and non-JPEG image
        sample data (including JPEG 2000 boxes, see Known limits).
+    Other page-description data (geometry boxes, graphics-state parameters, font
+    descriptors, soft masks, transfer functions) is also kept; only active content
+    (JavaScript, actions, launch, forms/widgets) and the document/image metadata listed
+    elsewhere in this section are removed;
   - everything reachable from the kept keys is walked: `/AA`, `/A`, `/JS`, `/JavaScript`,
     `/Launch`, `/OpenAction`, `/Next`, `/URI`, `/AF`, `/EF`, `/EmbeddedFile(s)`,
     `/Metadata`, `/PieceInfo`, `/Thumb`, `/OPI`, `/Names`, `/AcroForm`, `/XFA`,
@@ -252,9 +256,10 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     metadata stream, annotation or page-tree node is removed (array items become `null`).
     `/Type`, `/S`, `/Subtype` and `/Filter` are resolved through indirect references before
     they are compared, so `/S 10 0 R` pointing to `/Launch` is caught like `/S /Launch`.
-    A reference chain that cannot be resolved or is longer than 32 hops anywhere in the
-    walked graph fails closed with `PDF_INVALID` `{ reason: 'refchain' }`; nothing that was
-    not walked is copied;
+    A reference that cannot be followed because its chain is longer than 32 hops or cyclic
+    anywhere in the walked graph fails closed with `PDF_INVALID` `{ reason: 'refchain' }`;
+    references to missing objects are treated as null and dropped, as the PDF standard
+    requires (ISO 32000-1, 7.3.10); nothing that was not walked is copied;
   - every stream whose filter chain contains `DCTDecode` (whatever its `/Subtype`:
     image, soft mask, missing or indirect) is cleaned with the same
     `stripJpeg` as `imagesToPdf`: EXIF/GPS, XMP, IPTC, COM and other APPn are removed,

@@ -427,3 +427,24 @@ test('QA v4: XObject /PS and XObjects without a valid /Subtype are dropped; docu
     for (const keep of ['LEAK-FONTFILE', 'LEAK-TOUNICODE', 'LEAK-HALFTONE']) assert.ok(t.includes(keep), `${keep} kept`);
   }
 });
+
+test('QA v5: a reference to a missing object is treated as null (ISO 32000 7.3.10) and dropped, not rejected', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([200, 200]);
+  const missing = doc.context.nextRef(); // allocated but never assigned: object does not exist
+  const xo = doc.context.obj({});
+  xo.set(PDFName.of('ImMissing'), missing);
+  const res = doc.context.obj({});
+  res.set(PDFName.of('XObject'), xo);
+  page.node.set(PDFName.of('Resources'), res);
+  page.node.set(PDFName.of('MissingKey'), missing);
+  const src = await doc.save({ useObjectStreams: false });
+  const refStr = `${missing.objectNumber} ${missing.generationNumber} R`;
+  assert.ok(latin1(src).includes(refStr), 'fixture contains the dangling reference');
+  for (const out of await allOps(src)) {
+    const { issues } = await checkOut(out);
+    assert.deepEqual(issues, []);
+    const t = await fullText(out);
+    for (const b of ['ImMissing', 'MissingKey', refStr]) assert.ok(!t.includes(b), `${b} in output`);
+  }
+});
