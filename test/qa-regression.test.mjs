@@ -389,3 +389,62 @@ test('QA v3: private keys on Image, ICCBased, Separation/DeviceN tint functions,
     }
   }
 });
+
+// --- v4 (QA re-test of ea16ac5): Megan's v3 fixtures copied to test/qa/fixtures/v4.
+const allOps = async (src) => [await core.merge([{ bytes: src }]), (await core.split(src, '1'))[0].bytes, await core.organize(src, { order: [0, 0] })];
+const fullText = (out) => {
+  const doc = PDFDocument.load(out, { updateMetadata: false });
+  return doc.then((d) => {
+    let t = latin1(out);
+    for (const [, o] of d.context.enumerateIndirectObjects()) {
+      t += `\n${o instanceof PDFRawStream ? o.dict.toString() : o.toString()}`;
+      if (o instanceof PDFRawStream) { try { t += latin1(decodePDFRawStream(o).decode()); } catch { /* ignore */ } }
+    }
+    return t;
+  });
+};
+
+test('QA v4 blocker: reference chain > 32 hops anywhere in the sanitized graph fails closed with PDF_INVALID', async () => {
+  const src = rd('v4/refchain-40.pdf');
+  const isInvalid = (e) => e instanceof core.PdfToolError && e.code === 'PDF_INVALID' && e.details?.reason === 'refchain';
+  await assert.rejects(core.merge([{ bytes: src }]), isInvalid);
+  await assert.rejects(core.split(src, '1'), isInvalid);
+  await assert.rejects(core.organize(src, { order: [0, 0] }), isInvalid);
+});
+
+test('QA v4: a short (2-hop) chain is still walked and cleaned', async () => {
+  for (const out of await allOps(rd('v4/refchain-2.pdf'))) {
+    const { issues } = await checkOut(out);
+    assert.deepEqual(issues, []);
+  }
+});
+
+test('QA v4: XObject /PS and XObjects without a valid /Subtype are dropped; documented residual streams are kept', async () => {
+  for (const out of await allOps(rd('v4/fontstreams-ht-xobj.pdf'))) {
+    const t = await fullText(out);
+    for (const b of ['LEAK-PSXOBJ', 'LEAK-NOSUBTYPE', '/Subtype /PS', 'Launch']) assert.ok(!t.includes(b), `${b} in output`);
+    // Residual non-metadata streams kept for rendering (README "Residual streams"):
+    for (const keep of ['LEAK-FONTFILE', 'LEAK-TOUNICODE', 'LEAK-HALFTONE']) assert.ok(t.includes(keep), `${keep} kept`);
+  }
+});
+
+test('QA v5: a reference to a missing object is treated as null (ISO 32000 7.3.10) and dropped, not rejected', async () => {
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([200, 200]);
+  const missing = doc.context.nextRef(); // allocated but never assigned: object does not exist
+  const xo = doc.context.obj({});
+  xo.set(PDFName.of('ImMissing'), missing);
+  const res = doc.context.obj({});
+  res.set(PDFName.of('XObject'), xo);
+  page.node.set(PDFName.of('Resources'), res);
+  page.node.set(PDFName.of('MissingKey'), missing);
+  const src = await doc.save({ useObjectStreams: false });
+  const refStr = `${missing.objectNumber} ${missing.generationNumber} R`;
+  assert.ok(latin1(src).includes(refStr), 'fixture contains the dangling reference');
+  for (const out of await allOps(src)) {
+    const { issues } = await checkOut(out);
+    assert.deepEqual(issues, []);
+    const t = await fullText(out);
+    for (const b of ['ImMissing', 'MissingKey', refStr]) assert.ok(!t.includes(b), `${b} in output`);
+  }
+});

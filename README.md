@@ -195,8 +195,10 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     `/ExtGState`, `/ColorSpace`, `/Pattern`, `/Shading`, `/ProcSet`. `/Properties` is
     dropped: it only feeds marked / optional content, which has no effect without the
     catalog `/OCProperties` and `/StructTreeRoot` (never copied), so rendering is unchanged;
-  - dicts below `/Resources` keep only per-type ALLOWLISTS of keys (private and unknown
-    keys are removed, including any stream or dict they point to):
+  - for dictionaries recognised by type, dicts below `/Resources` keep only per-type
+    ALLOWLISTS of keys (private and unknown keys are removed, including any stream or dict
+    they point to); dictionaries not recognised by type are kept as described in the
+    'Other page-description data' paragraph below:
     - Font: `/Type /Subtype /BaseFont /Name /FirstChar /LastChar /Widths /FontDescriptor
       /Encoding /ToUnicode /DescendantFonts /CIDSystemInfo /DW /W /DW2 /W2 /CIDToGIDMap
       /FontBBox /FontMatrix /CharProcs /Resources`;
@@ -211,7 +213,8 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
       /Filter /DecodeParms /DL` (so `/Ref`, `/OC`, `/F` external streams, `/LastModified`,
       `/Measure`, `/PtData` and private keys are removed);
     - transparency group (page and Form `/Group`): `/Type /S /CS /I /K`;
-    - Image XObject (also soft masks / stencil masks): `/Type /Subtype /Width /Height
+    - Image XObject (for dictionaries recognised by type, also soft masks / stencil
+      masks with `/Subtype /Image`): `/Type /Subtype /Width /Height
       /ColorSpace /BitsPerComponent /Intent /ImageMask /Mask /Decode /Interpolate /SMask
       /SMaskInData /Matte /Length /Filter /DecodeParms /DL` (so `/Alternates`, `/Name`,
       `/Metadata`, `/OPI`, `/OC`, `/ID`, `/StructParent` and private keys are removed);
@@ -225,9 +228,31 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
       /VerticesPerRow` (+ stream keys);
     - Function (tint transforms, shading functions): `/FunctionType /Domain /Range /Size
       /BitsPerSample /Order /Encode /Decode /C0 /C1 /N /Functions /Bounds` (+ stream keys).
-    Other dicts (DeviceN `/Process` and `/MixingHints` contents, Type3 `/CharProcs` and
-    `/Encoding` dicts, ...) are not key-allowlisted; they get only the forbidden-key and
-    dangerous-object removal below;
+    `/XObject` entries that are not a stream with `/Subtype /Image` or `/Subtype /Form`
+    (PostScript `/Subtype /PS` XObjects, XObjects with a missing or unknown `/Subtype`)
+    are removed;
+  - residual non-metadata streams and dicts that are KEPT because rendering needs them,
+    with only the forbidden-key and dangerous-object removal below (their bytes are copied
+    as-is and could carry private data). Kept data includes, for example:
+    1. font programs: FontDescriptor `/FontFile`, `/FontFile2`, `/FontFile3` streams;
+    2. Font `/ToUnicode` CMap streams;
+    3. Indexed colour space lookup table (string or stream);
+    4. ExtGState `/HT` halftone dicts and streams (including halftones nested inside them);
+    5. DeviceN attributes `/Process` and `/MixingHints` dicts (contents not allowlisted);
+    6. Type3 font `/CharProcs` dict (every glyph procedure stream in it) and Font
+       `/Encoding` dicts (Type3 and other fonts);
+    7. CIDFont `/CIDToGIDMap` stream, FontDescriptor `/CIDSet` stream, `/FD` dict and
+       Font `/CIDSystemInfo` dict;
+    8. ICCBased profile data, Function stream data (sampled Type 0 tables, Type 4
+       PostScript calculator code) and Shading stream data (mesh vertices);
+    9. page content streams, Form XObject and tiling Pattern content, and non-JPEG image
+       sample data (including JPEG 2000 boxes, see Known limits).
+    Other page-description data (geometry boxes, graphics-state parameters, font
+    descriptors, soft masks, transfer functions, Shading functions, ColorSpace
+    parameters, unrecognised fonts and masks such as `/SMask` or `/Mask` without
+    `/Subtype` or an ExtGState `/Font` font without `/Type`) is also kept; only active content
+    (JavaScript, actions, launch, forms/widgets) and the document/image metadata listed
+    elsewhere in this section are removed;
   - everything reachable from the kept keys is walked: `/AA`, `/A`, `/JS`, `/JavaScript`,
     `/Launch`, `/OpenAction`, `/Next`, `/URI`, `/AF`, `/EF`, `/EmbeddedFile(s)`,
     `/Metadata`, `/PieceInfo`, `/Thumb`, `/OPI`, `/Names`, `/AcroForm`, `/XFA`,
@@ -235,7 +260,11 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
     any entry or array item that is an action dict, file specification, embedded file,
     metadata stream, annotation or page-tree node is removed (array items become `null`).
     `/Type`, `/S`, `/Subtype` and `/Filter` are resolved through indirect references before
-    they are compared, so `/S 10 0 R` pointing to `/Launch` is caught like `/S /Launch`;
+    they are compared, so `/S 10 0 R` pointing to `/Launch` is caught like `/S /Launch`.
+    A reference that cannot be followed because its chain is longer than 32 hops or cyclic
+    anywhere in the walked graph fails closed with `PDF_INVALID` `{ reason: 'refchain' }`;
+    references to missing objects are treated as null (the reference may remain, with no
+    data), as the PDF standard requires (ISO 32000-1, 7.3.10); nothing that was not walked is copied;
   - every stream whose filter chain contains `DCTDecode` (whatever its `/Subtype`:
     image, soft mask, missing or indirect) is cleaned with the same
     `stripJpeg` as `imagesToPdf`: EXIF/GPS, XMP, IPTC, COM and other APPn are removed,
@@ -260,7 +289,7 @@ Agreed with QA/Security and Counsel; covered by tests in `test/`.
   the remaining `MAX_DECOMPRESSED_BYTES` budget of the call; otherwise the call throws
   `TOO_LARGE` `{ reason: 'decompressed', limit }` (a 1 GiB object stream fails in ~1.5 s
   with ~200 MB peak RSS). Content streams are copied without being decoded.
-- Known limits (not cleaned): metadata inside JPEG 2000 (`JPXDecode`) boxes and inside
+- Known limits (not cleaned): the residual streams listed above, metadata inside JPEG 2000 (`JPXDecode`) boxes and inside
   inline images (`BI ... ID ... EI` in content streams), and text in content streams
   themselves. PNG decoding in `imagesToPdf` is bounded by `MAX_IMAGE_PIXELS`, not by
   `MAX_DECOMPRESSED_BYTES`.
