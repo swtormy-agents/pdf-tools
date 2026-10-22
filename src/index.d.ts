@@ -101,6 +101,10 @@ export declare function imagesToPdf(list: ImageInput[], options?: ImagesToPdfOpt
 export declare function parsePageRanges(spec: string, pageCount: number, maxTotal?: number): number[][];
 
 export declare function jpegSize(bytes: Uint8Array): { width: number; height: number };
+/** All SOFn / DHP (0xDE) frame headers of a JPEG, in file order, read without decoding. */
+export declare function jpegFrames(bytes: Uint8Array): { marker: number; width: number; height: number }[];
+/** Header-only pixel count used for MAX_IMAGE_PIXELS: largest JPEG frame, or PNG IHDR. */
+export declare function imagePixels(bytes: Uint8Array, kind: 'jpeg' | 'png'): { width: number; height: number; pixels: number };
 export declare function pngSize(bytes: Uint8Array): { width: number; height: number };
 export declare function jpegOrientation(bytes: Uint8Array): 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export declare function stripJpeg(bytes: Uint8Array): Uint8Array;

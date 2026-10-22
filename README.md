@@ -143,7 +143,7 @@ Frozen object, used by the core itself; there is no per-call override.
 | `MAX_SPLIT_TOTAL_PAGES` | `5000` | `split`: pages of all parts together (repeats counted) |
 | `MAX_SPLIT_PARTS` | `50` | `split`: number of output parts |
 | `MAX_FILES` | `50` | items in `merge` / `imagesToPdf` |
-| `MAX_IMAGE_PIXELS` | `50_000_000` | width x height of each image, from the header |
+| `MAX_IMAGE_PIXELS` | `50_000_000` | width x height of each image, from the header (JPEG: the largest of all SOFn/DHP frame headers up to EOI; PNG: the single IHDR, a second IHDR is `IMAGE_INVALID`); exactly 50,000,000 passes |
 | `MAX_DECOMPRESSED_BYTES` | `500 * 1024 * 1024` | bytes decompressed from PDF streams during one call, all inputs together (object streams, xref streams, filters in front of DCTDecode images) |
 
 Byte and file-count limits are checked before anything is parsed.

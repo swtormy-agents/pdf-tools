@@ -1,31 +1,59 @@
 import { fail } from './errors.js';
 
-/** Read width/height from a JPEG SOFn segment without decoding. */
-export function jpegSize(b) {
+const isSofMarker = (m) => m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc;
+
+/**
+ * All frame headers of a JPEG, read without decoding: every SOFn (baseline, extended,
+ * progressive, lossless, arithmetic) and DHP (hierarchical, 0xDE), in file order, up to EOI.
+ * Entropy-coded data after each SOS is skipped (stuffed 0xFF00 and RSTn are not markers),
+ * so frames after the first scan (progressive / multi-frame / crafted files) are seen too.
+ * A truncated tail after the first frame header is tolerated (stripJpeg rejects it later).
+ */
+export function jpegFrames(b) {
   const n = b.length;
   if (n < 4 || b[0] !== 0xff || b[1] !== 0xd8) fail('IMAGE_INVALID', 'Not a JPEG file');
+  const frames = [];
   let i = 2;
+  const bad = (msg) => { if (frames.length) return true; fail('IMAGE_INVALID', msg); };
   while (i < n) {
-    if (b[i] !== 0xff) fail('IMAGE_INVALID', 'Corrupt JPEG marker');
+    if (b[i] !== 0xff) { if (bad('Corrupt JPEG marker')) break; }
     while (i < n && b[i] === 0xff) i++;
     if (i >= n) break;
     const m = b[i++];
     if (m === 0xd8 || m === 0x01 || (m >= 0xd0 && m <= 0xd7)) continue;
-    if (m === 0xd9 || m === 0xda) break; // EOI / SOS before any SOF
+    if (m === 0xd9) break; // EOI
     if (i + 2 > n) break;
     const len = (b[i] << 8) | b[i + 1];
-    if (len < 2 || i + len > n) fail('IMAGE_INVALID', 'Corrupt JPEG segment');
-    const isSof = m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc;
-    if (isSof) {
-      if (len < 8) fail('IMAGE_INVALID', 'Corrupt JPEG SOF');
+    if (len < 2 || i + len > n) { if (bad('Corrupt JPEG segment')) break; }
+    if (isSofMarker(m) || m === 0xde) {
+      if (len < 8) { if (bad('Corrupt JPEG SOF')) break; }
       const height = (b[i + 3] << 8) | b[i + 4];
       const width = (b[i + 5] << 8) | b[i + 6];
-      if (width === 0 || height === 0) fail('IMAGE_INVALID', 'JPEG without dimensions');
-      return { width, height };
+      frames.push({ marker: m, width, height });
     }
     i += len;
+    if (m === 0xda) {
+      if (!frames.length) break; // SOS before any frame header
+      while (i < n) {
+        if (b[i] === 0xff && i + 1 < n) {
+          const nx = b[i + 1];
+          if (nx === 0x00 || (nx >= 0xd0 && nx <= 0xd7)) { i += 2; continue; }
+          break;
+        }
+        i++;
+      }
+    }
   }
-  fail('IMAGE_INVALID', 'JPEG has no frame header');
+  if (!frames.length) fail('IMAGE_INVALID', 'JPEG has no frame header');
+  return frames;
+}
+
+/** Read width/height from the first JPEG SOFn segment without decoding. */
+export function jpegSize(b) {
+  const first = jpegFrames(b).find((f) => f.marker !== 0xde);
+  if (!first) fail('IMAGE_INVALID', 'JPEG has no frame header');
+  if (first.width === 0 || first.height === 0) fail('IMAGE_INVALID', 'JPEG without dimensions');
+  return { width: first.width, height: first.height };
 }
 
 // Segments kept: APP0 (JFIF), APP2 only when it is an ICC_PROFILE (colour profile), APP14
@@ -153,7 +181,11 @@ function u32(b, i) {
   return ((b[i] << 24) >>> 0) + ((b[i + 1] << 16) | (b[i + 2] << 8) | b[i + 3]);
 }
 
-/** Read width/height from the PNG IHDR chunk without decoding. */
+/**
+ * Read width/height from the PNG IHDR chunk without decoding. IHDR must be the first chunk
+ * and the only one: decoders that take the last IHDR (UPNG in pdf-lib does) would otherwise
+ * decode a size different from the one checked against the pixel limit.
+ */
 export function pngSize(b) {
   if (!isPng(b) || b.length < 33) fail('IMAGE_INVALID', 'Not a PNG file');
   const type = String.fromCharCode(b[12], b[13], b[14], b[15]);
@@ -161,7 +193,25 @@ export function pngSize(b) {
   const width = u32(b, 16);
   const height = u32(b, 20);
   if (width === 0 || height === 0) fail('IMAGE_INVALID', 'PNG without dimensions');
+  for (let i = 33; i + 12 <= b.length;) {
+    const t = String.fromCharCode(b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
+    if (t === 'IHDR') fail('IMAGE_INVALID', 'PNG with more than one IHDR');
+    if (t === 'IEND') break;
+    i += 12 + u32(b, i);
+  }
   return { width, height };
+}
+
+/**
+ * Pixel count checked against LIMITS.MAX_IMAGE_PIXELS, from headers only (no decoding):
+ * JPEG = the largest frame among all SOFn/DHP headers; PNG = IHDR width x height.
+ */
+export function imagePixels(b, kind) {
+  if (kind === 'png') { const { width, height } = pngSize(b); return { width, height, pixels: width * height }; }
+  const first = jpegSize(b);
+  let best = { width: first.width, height: first.height, pixels: first.width * first.height };
+  for (const f of jpegFrames(b)) if (f.width * f.height > best.pixels) best = { width: f.width, height: f.height, pixels: f.width * f.height };
+  return best;
 }
 
 // Chunks pdf-lib (UPNG) needs to decode the first frame. Everything else (tEXt, iTXt, zTXt,
@@ -183,6 +233,7 @@ export function stripPng(b) {
     const end = i + 12 + len;
     if (end > b.length) fail('IMAGE_INVALID', 'Corrupt PNG chunk');
     const type = String.fromCharCode(b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
+    if (type === 'IHDR' && i !== 8) fail('IMAGE_INVALID', 'PNG with more than one IHDR');
     if (PNG_KEEP.has(type)) parts.push(b.subarray(i, end));
     i = end;
     if (type === 'IEND') { sawEnd = true; break; }
