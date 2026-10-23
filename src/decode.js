@@ -37,6 +37,9 @@ function flateSize(bytes, left, budget) {
   // Low-level pako with ONE reused 64 KiB output buffer. pako.Inflate allocates a fresh
   // 64 KiB buffer per chunk, so counting up to the 500 MB cap produced ~500 MB of short-lived
   // ArrayBuffers per call; on macOS that garbage showed up as ~2 GB peak RSS (CI B2).
+  // windowBits 15 = zlib wrapper only. A gzip-wrapped stream fails on its first inflate call
+  // and counts as 0 here; that is safe: pdf-lib's FlateStream rejects the gzip header
+  // ('Unknown compression method'), and decodeStage's readBlock loop enforces the budget anyway.
   const strm = new ZStream();
   if (zlibInflate.inflateInit2(strm, 15) !== 0) return 0;
   const out = new Uint8Array(64 * 1024);
