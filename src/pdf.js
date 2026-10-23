@@ -14,7 +14,7 @@ import { LIMITS } from './limits.js';
 import { parsePageRanges } from './ranges.js';
 import { sanitizeSourcePage, newSanitizeState } from './sanitize.js';
 import { newBudget, guardParser, failDecompressed } from './decode.js';
-import { jpegSize, pngSize, stripJpeg, stripPng, jpegOrientation } from './images.js';
+import { jpegSize, pngSize, imagePixels, stripJpeg, stripPng, jpegOrientation } from './images.js';
 
 // PDF user space limit (Acrobat): 14400 pt = 200 in.
 const MAX_PAGE_PT = 14400;
@@ -386,13 +386,16 @@ export async function imagesToPdf(list, options) {
     const kind = detectImage(item.bytes);
     if (!kind) fail('UNSUPPORTED_IMAGE', `Item ${idx}: only JPEG and PNG are supported`, { index: idx });
     let size;
+    let px;
     try {
       size = kind === 'jpeg' ? jpegSize(item.bytes) : pngSize(item.bytes);
+      // Limit = largest frame header (a JPEG may carry more than one SOFn/DHP).
+      px = imagePixels(item.bytes, kind);
     } catch (e) {
       throw withIndex(e, idx);
     }
-    if (size.width * size.height > LIMITS.MAX_IMAGE_PIXELS) {
-      fail('IMAGE_TOO_LARGE', `Item ${idx}: image has more than ${LIMITS.MAX_IMAGE_PIXELS} pixels`, { index: idx, max: LIMITS.MAX_IMAGE_PIXELS, ...size });
+    if (px.pixels > LIMITS.MAX_IMAGE_PIXELS) {
+      fail('IMAGE_TOO_LARGE', `Item ${idx}: image has more than ${LIMITS.MAX_IMAGE_PIXELS} pixels`, { index: idx, max: LIMITS.MAX_IMAGE_PIXELS, width: px.width, height: px.height });
     }
     // Orientation is read BEFORE stripping APP1 (EXIF).
     const orientation = kind === 'jpeg' ? jpegOrientation(item.bytes) : 1;
