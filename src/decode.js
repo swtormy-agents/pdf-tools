@@ -1,5 +1,6 @@
 import { PDFName, PDFRawStream, PDFDict, PDFArray, PDFRef, decodePDFRawStream } from 'pdf-lib';
-import pako from 'pako';
+import zlibInflate from 'pako/lib/zlib/inflate.js';
+import ZStream from 'pako/lib/zlib/zstream.js';
 import { fail } from './errors.js';
 import { LIMITS } from './limits.js';
 
@@ -33,14 +34,34 @@ function exceed(budget) {
  * the first data error or at the end of input: pdf-lib's own decoder then decides.
  */
 function flateSize(bytes, left, budget) {
+  // Low-level pako with ONE reused 64 KiB output buffer. pako.Inflate allocates a fresh
+  // 64 KiB buffer per chunk, so counting up to the 500 MB cap produced ~500 MB of short-lived
+  // ArrayBuffers per call; on macOS that garbage showed up as ~2 GB peak RSS (CI B2).
+  // windowBits 15 = zlib wrapper only. A gzip-wrapped stream fails on its first inflate call
+  // and counts as 0 here; that is safe: pdf-lib's FlateStream rejects the gzip header
+  // ('Unknown compression method'), and decodeStage's readBlock loop enforces the budget anyway.
+  const strm = new ZStream();
+  if (zlibInflate.inflateInit2(strm, 15) !== 0) return 0;
+  const out = new Uint8Array(64 * 1024);
+  strm.input = bytes;
+  strm.next_in = 0;
+  strm.avail_in = bytes.length;
   let n = 0;
-  const inf = new pako.Inflate({ chunkSize: 64 * 1024 });
-  inf.onData = (chunk) => {
-    n += chunk.length;
-    if (n > left) exceed(budget);
-  };
-  inf.onEnd = () => {};
-  inf.push(bytes, true);
+  try {
+    for (;;) {
+      strm.output = out;
+      strm.next_out = 0;
+      strm.avail_out = out.length;
+      const r = zlibInflate.inflate(strm, 4 /* Z_FINISH */);
+      n += strm.next_out;
+      if (n > left) exceed(budget);
+      // Z_STREAM_END, data error, or no progress possible: pdf-lib's own decoder decides.
+      if (r !== 0 /* Z_OK */ && r !== -5 /* Z_BUF_ERROR */) break;
+      if (strm.next_out === 0) break;
+    }
+  } finally {
+    zlibInflate.inflateEnd(strm);
+  }
   return n;
 }
 
