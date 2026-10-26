@@ -309,7 +309,7 @@ the core; they should still route their own logging to stderr.
 
 ```sh
 npm ci
-npm test            # node --test "test/**/*.test.mjs"
+npm test            # node --test test/*.test.mjs
 npm run fixtures    # optional: write fixtures to test/fixtures/out/ for manual inspection
 ```
 
