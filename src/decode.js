@@ -87,6 +87,8 @@ function decodeStage(ctx, bytes, filter, parms, left, budget) {
  * Decode the filters of a stream (pdf-lib's decoders: Flate, LZW, ASCII85, ASCIIHex,
  * RunLength) stage by stage. The output of EVERY stage is charged to the budget, so no
  * stage can grow past what is left of it.
+ * Callers must wrap its errors: TOO_LARGE and PDF_INVALID are already PdfToolError, but
+ * pdf-lib's decoder throws raw Error on a malformed stream.
  * @returns {Uint8Array}
  */
 export function boundedDecode(dict, contents, budget) {
