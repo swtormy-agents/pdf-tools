@@ -33,7 +33,7 @@
   },
   "scripts": {
     "fixtures": "node test/fixtures/gen.mjs",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "pako": "1.0.11",
