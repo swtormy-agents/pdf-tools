@@ -1,5 +1,7 @@
 # @local-pdf-tools/core
 
+Used by [Local PDF Tools](https://noclaudkit.com/pdf/) (runs in the browser)
+
 Pure JavaScript PDF functions for local, private PDF tools: **merge, split, organize
 (reorder / rotate / delete) and images to PDF**. Every function takes `Uint8Array` input
 plus plain parameters and returns `Uint8Array` output.
